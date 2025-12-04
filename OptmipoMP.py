@@ -35,11 +35,13 @@ st.markdown("""
 GOOGLE_SCRIPT_URL = ""  # Pega tu URL de Google Apps Script aquí
 
 # ==============================================================================
-# 1. SISTEMA DE REGISTRO
+# 1. SISTEMA DE REGISTRO Y ESTADO
 # ==============================================================================
 if 'usuario_registrado' not in st.session_state: st.session_state['usuario_registrado'] = False
 if 'datos_usuario' not in st.session_state: st.session_state['datos_usuario'] = {}
-if 'design_optimo' not in st.session_state: st.session_state['design_optimo'] = None
+
+# CORRECCIÓN DEL ERROR: Inicializar como diccionario vacío, no como None
+if 'design_optimo' not in st.session_state: st.session_state['design_optimo'] = {} 
 
 def enviar_a_google_sheets(datos):
     if not GOOGLE_SCRIPT_URL: return True
@@ -69,11 +71,26 @@ def mostrar_registro():
 # ==============================================================================
 
 def get_dywidag_db():
+    """
+    Catálogo Dywidag Systems International (DSI) - SOLO DYWIDAG.
+    """
     data = {
-        "Sistema": ["R25-210", "R32-280", "R32-360", "R38-500", "R38-550", "R51-660", "R51-800", "T76-1200", "T76-1600"],
-        "D_ext_mm": [25, 32, 32, 38, 38, 51, 51, 76, 76],
-        "As_mm2": [260, 410, 510, 750, 800, 970, 1150, 1610, 1990],
-        "fy_MPa": [500, 535, 550, 533, 560, 555, 556, 620, 600]
+        "Sistema": [
+            "R25-210", "R32-280", "R32-360", "R38-500", "R38-550", 
+            "R51-660", "R51-800", "T76-1200", "T76-1600", "T76-1900"
+        ],
+        "D_ext_mm": [
+            25, 32, 32, 38, 38, 
+            51, 51, 76, 76, 76
+        ],
+        "As_mm2": [
+            260, 410, 510, 750, 800, 
+            970, 1150, 1610, 1990, 2360
+        ],
+        "fy_MPa": [
+            500, 535, 550, 533, 560, 
+            555, 556, 620, 600, 635
+        ]
     }
     return pd.DataFrame(data)
 
@@ -82,14 +99,10 @@ def procesar_geotecnia(df_input):
     z_acum = 0
     for _, row in df_input.iterrows():
         try:
-            # Uso de .get con valor default para evitar KeyError si la columna no existe
-            esp = float(row.get('Espesor_m', 0))
-            tipo = row.get('Tipo', 'Arcilla')
-            n_spt = float(row.get('N_SPT', 0))
-            su = float(row.get('Su_kPa', 0))
-            kh = float(row.get('Kh_kNm3', 0))
-            a_manual = float(row.get('Alpha_Manual', 0))
-        except ValueError: continue
+            esp = float(row.get('Espesor_m', 0)); tipo = row.get('Tipo', 'Arcilla')
+            n_spt = float(row.get('N_SPT', 0)); su = float(row.get('Su_kPa', 0))
+            kh = float(row.get('Kh_kNm3', 0)); a_manual = float(row.get('Alpha_Manual', 0))
+        except: continue
         
         phi = 0; E_MPa = 0; alpha = 0
         if tipo == "Arena":
@@ -190,7 +203,6 @@ def app_principal():
     with st.sidebar:
         st.success(f"Ingeniero: **{st.session_state['datos_usuario'].get('nombre')}**")
         
-        # --- GENERACIÓN PDF ---
         if st.button("📄 Generar Reporte PDF"):
             try:
                 buffer = BytesIO()
@@ -200,7 +212,8 @@ def app_principal():
                 p.drawString(100, 710, f"Empresa: {st.session_state['datos_usuario'].get('empresa')}")
                 p.drawString(100, 680, "Resumen de Resultados:")
                 
-                opt = st.session_state.get('design_optimo')
+                # Obtener de forma segura (con valor por defecto {})
+                opt = st.session_state.get('design_optimo') or {}
                 if opt:
                     p.drawString(100, 660, f"Configuración Óptima: {opt.get('N')} x D={opt.get('D_mm')}mm")
                     p.drawString(100, 640, f"Longitud: {opt.get('L_m')} m | CO2 Estimado: {opt.get('CO2_Ton'):.1f} Ton")
@@ -226,14 +239,12 @@ def app_principal():
     ])
 
     # --------------------------------------------------------------------------
-    # TAB 1: GEOTECNIA (CORREGIDA)
+    # TAB 1: GEOTECNIA
     # --------------------------------------------------------------------------
     with tab1:
         c1, c2 = st.columns([1.5, 1])
         with c1:
             st.subheader("Caracterización del Subsuelo")
-            
-            # Tabla base
             df_template = pd.DataFrame([
                 {"Espesor_m": 4.0, "Tipo": "Arcilla", "N_SPT": 5, "Su_kPa": 40, "Kh_kNm3": 8000, "Alpha_Manual": 0.0},
                 {"Espesor_m": 8.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 25000, "Alpha_Manual": 0.0},
@@ -246,18 +257,9 @@ def app_principal():
             )
             df_geo = procesar_geotecnia(edited_df)
             
-            # --- CORRECCIÓN DEL ERROR DE FORMATO ---
-            # Solo aplicamos formato numérico a las columnas que SON numéricas.
-            # 'Tipo' es string y no debe formatearse.
-            format_dict = {
-                "z_ini": "{:.1f}", "z_fin": "{:.1f}", "Espesor_m": "{:.1f}",
-                "N_SPT": "{:.0f}", "Su_kPa": "{:.1f}", "Kh_kNm3": "{:.0f}",
-                "Alpha_Design": "{:.1f}", "Phi_Deg": "{:.1f}", "E_MPa": "{:.1f}"
-            }
-            # Filtramos el diccionario para usar solo columnas que existen en el dataframe
-            actual_format = {k: v for k, v in format_dict.items() if k in df_geo.columns}
-            
-            st.dataframe(df_geo.style.format(actual_format), use_container_width=True)
+            # Formato seguro
+            format_cols = {col: "{:.1f}" for col in df_geo.columns if df_geo[col].dtype in ['float64', 'int64']}
+            st.dataframe(df_geo.style.format(format_cols), use_container_width=True)
             
             layers_objs = []
             for _, r in df_geo.iterrows():
@@ -301,6 +303,7 @@ def app_principal():
                 st.error("Defina la estratigrafía en Tab 1 primero.")
             else:
                 Carga_kN = Carga_Total * 9.81
+                # Solo Dywidag Comunes para optimizar rapido
                 DIAMETROS_COM = {0.100: 1.0, 0.150: 0.9, 0.200: 0.85, 0.250: 0.8}
                 resultados = []
                 engine = GeotechEngine(st.session_state['layers_objs'])
@@ -348,7 +351,8 @@ def app_principal():
     with tab3:
         st.subheader("📐 Verificación Detallada (Diseño Seleccionado)")
         
-        opt = st.session_state.get('design_optimo', {})
+        # Recuperación SEGURA de datos (Fix del error AttributeError)
+        opt = st.session_state.get('design_optimo') or {} 
         def_L = float(opt.get('L_m', 12.0)); def_D = float(opt.get('D_mm', 200.0))/1000
         
         c_in, c_out = st.columns([1, 1.5])
@@ -425,13 +429,11 @@ def app_principal():
             st.metric("Carga Total", f"{Q_tot:.1f} kN")
             st.metric("Micropilotes Req.", N)
             
-            # Verificación Punzonamiento
             d_eff = H - 0.075
             bo = np.pi*(0.2 + d_eff)
             vc = 0.75 * 0.33 * np.sqrt(fcl) * bo * d_eff * 1000
-            pu = Q_unit * 1.4
+            pu = Q_unit * 1.4 
             
-            # Cálculo seguro de ratio
             ratio = pu / vc if vc > 0 else 999
             
             st.write(f"**Carga Pu:** {pu:.1f} kN | **Capacidad phi*Vc:** {vc:.1f} kN")
