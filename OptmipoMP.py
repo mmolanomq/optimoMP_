@@ -83,45 +83,40 @@ def procesar_geotecnia(df_input):
         esp = float(row.get('Espesor_m', 0))
         tipo = row.get('Tipo', 'Arcilla')
         n_spt = float(row.get('N_SPT', 0))
-        su = float(row.get('Su_kPa', 0)) # Cohesión no drenada
+        su = float(row.get('Su_kPa', 0)) 
         kh = float(row.get('Kh_kNm3', 0))
-        alpha_manual = float(row.get('Alpha_Bond_Manual', 0)) # Dato libre
+        alpha_manual = float(row.get('Alpha_Bond_Manual', 0)) 
         
         # --- 1. Correlaciones Angulo Fricción (Arenas) ---
         phi_design = 0
         if tipo == "Arena":
-            # Wolff (1989): phi = 27.1 + 0.3*N - 0.00054*N^2
+            # Wolff (1989)
             phi_wolff = 27.1 + 0.3 * n_spt - 0.00054 * (n_spt**2)
-            # Hatanaka (1996): phi = sqrt(20*N) + 20
+            # Hatanaka (1996)
             phi_hat = np.sqrt(20 * n_spt) + 20
             phi_design = (phi_wolff + phi_hat) / 2
         
         # --- 2. Módulo Elástico (E) ---
         E_MPa = 0
         if tipo == "Arena":
-            # Kulhawy & Mayne (1990): E/Pa approx 10*N a 15*N. Usamos conservador.
-            E_MPa = 1.0 * n_spt # MPa
+            E_MPa = 1.0 * n_spt 
         elif tipo == "Arcilla":
-            # E = Beta * Su. Beta ~ 200-500.
-            E_MPa = (300 * su) / 1000 # MPa
+            E_MPa = (300 * su) / 1000 
         else: # Roca
-            E_MPa = 5000 # Valor base referencia roca
+            E_MPa = 5000 
             
         # --- 3. Adherencia (Alpha Bond - FHWA) ---
         alpha_calc = 0
         if tipo == "Arena":
-            # Aprox FHWA Type B: ~ 3.8 * N (limitado)
             alpha_calc = min(3.8 * n_spt, 250)
         elif tipo == "Arcilla":
-            # FHWA Table 5-3 Simplificada
             if su < 25: alpha_calc = 20
             elif su < 50: alpha_calc = 40
             elif su < 100: alpha_calc = 70
             else: alpha_calc = 100
         else: # Roca
-            alpha_calc = 300 # Referencia base
+            alpha_calc = 300 
             
-        # LÓGICA DE SELECCIÓN: Si el usuario puso valor manual > 0, usa ese.
         alpha_final = alpha_manual if alpha_manual > 0 else alpha_calc
         
         z_fin = z_acum + esp
@@ -136,7 +131,7 @@ def procesar_geotecnia(df_input):
             "Kh_kNm3": kh,
             "Alpha_Manual": alpha_manual,
             "Alpha_Calc": alpha_calc,
-            "Alpha_Design": alpha_final, # ESTE ES EL QUE SE USA PARA CALCULO
+            "Alpha_Design": alpha_final, 
             "Phi_Design": phi_design,
             "E_MPa": E_MPa
         })
@@ -161,7 +156,6 @@ class MicropileAnalyzer:
         for z in z_arr:
             alpha = 0
             if z > 0:
-                # Buscar capa
                 for l in self.layers:
                     if l.contains(z): alpha = l.alpha_bond; break
                 if z > self.layers[-1].z_bot: alpha = self.layers[-1].alpha_bond
@@ -172,7 +166,6 @@ class MicropileAnalyzer:
         return z_arr, np.array(q_ult_list), np.array(q_adm_list)
 
 def calc_winkler(L, D, EI, kh, V, M):
-    # Solución simplificada viga larga
     beta = ((kh * D) / (4 * EI))**0.25
     z = np.linspace(0, L, 200)
     y_list = []
@@ -212,7 +205,7 @@ def app_principal():
             st.subheader("1.1 Caracterización del Subsuelo")
             st.info("Ingrese la estratigrafía. Deje 'Alpha Manual' en 0 para usar correlaciones automáticas.")
             
-            # CONFIGURACIÓN DE LA TABLA EDITABLE (Selectbox para Tipo)
+            # CONFIGURACIÓN DE LA TABLA EDITABLE
             df_template = pd.DataFrame([
                 {"Espesor_m": 3.0, "Tipo": "Arcilla", "N_SPT": 4, "Su_kPa": 35, "Kh_kNm3": 8000, "Alpha_Bond_Manual": 0.0},
                 {"Espesor_m": 7.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 22000, "Alpha_Bond_Manual": 0.0},
@@ -224,14 +217,11 @@ def app_principal():
                 column_config={
                     "Tipo": st.column_config.SelectboxColumn(
                         "Tipo de Suelo",
-                        help="Seleccione el comportamiento predominante",
-                        width="medium",
                         options=["Arcilla", "Arena", "Roca", "Relleno"],
                         required=True
                     ),
                     "Alpha_Bond_Manual": st.column_config.NumberColumn(
                         "Alpha Bond Manual (kPa)",
-                        help="Si > 0, sobrescribe la correlación.",
                         format="%.1f"
                     )
                 },
@@ -239,14 +229,20 @@ def app_principal():
                 use_container_width=True
             )
             
-            # PROCESAMIENTO DE CORRELACIONES
+            # PROCESAMIENTO
             df_geo = procesar_geotecnia(edited_df)
             
             st.markdown("---")
             st.markdown("#### 1.2 Parámetros de Diseño Calculados")
-            # Mostrar solo columnas relevantes, formato seguro
             cols_show = ["z_ini", "z_fin", "Tipo", "Alpha_Design", "Kh_kNm3", "Phi_Design", "E_MPa"]
-            st.dataframe(df_geo[cols_show].style.format("{:.1f}", subset=cols_show[3:]), use_container_width=True)
+            st.dataframe(
+                df_geo[cols_show].style.format({
+                    "z_ini": "{:.1f}", "z_fin": "{:.1f}", 
+                    "Alpha_Design": "{:.1f}", "Kh_kNm3": "{:.0f}",
+                    "Phi_Design": "{:.1f}", "E_MPa": "{:.1f}"
+                }), 
+                use_container_width=True
+            )
             
             with st.expander("📝 Ver Ecuaciones de Correlación Utilizadas"):
                 st.markdown("**1. Ángulo de Fricción (Arenas)**")
@@ -274,14 +270,24 @@ def app_principal():
                 axs[0].set_xlim(0, 1); axs[0].set_ylabel("Profundidad (m)")
                 axs[0].get_xaxis().set_visible(False)
                 
-                # Helper para graficar escalonado
-                z_plot = [0]; n_plot = [df_geo.iloc[0]['N_SPT']]; a_plot = [df_geo.iloc[0]['Alpha_Design']]; k_plot = [df_geo.iloc[0]['Kh_kNm3']]
+                # --- CORRECCIÓN CRÍTICA DE DIMENSIONES PARA GRÁFICAS ESCALONADAS ---
+                z_plot = []
+                n_plot = []
+                a_plot = []
+                k_plot = []
+                
                 for _, r in df_geo.iterrows():
-                    z_plot.extend([r['z_ini'], r['z_fin']])
-                    n_plot.extend([r['N_SPT'], r['N_SPT']])
-                    a_plot.extend([r['Alpha_Design'], r['Alpha_Design']])
-                    k_plot.extend([r['Kh_kNm3'], r['Kh_kNm3']])
-                z_plot = z_plot[1:] # Ajuste indices
+                    # Punto inicial del estrato
+                    z_plot.append(r['z_ini'])
+                    n_plot.append(r['N_SPT'])
+                    a_plot.append(r['Alpha_Design'])
+                    k_plot.append(r['Kh_kNm3'])
+                    
+                    # Punto final del estrato (para hacer el escalón)
+                    z_plot.append(r['z_fin'])
+                    n_plot.append(r['N_SPT'])
+                    a_plot.append(r['Alpha_Design'])
+                    k_plot.append(r['Kh_kNm3'])
                 
                 # 2. N-SPT
                 axs[1].plot(n_plot, z_plot, 'b-', lw=1.5)
@@ -358,10 +364,11 @@ def app_principal():
                 fig2, ax2 = plt.subplots(figsize=(8, 6))
                 
                 # Fondo estratos
+                max_q = max(q_ult) if len(q_ult)>0 else 100
                 for _, r in df_geo.iterrows():
-                    rect = patches.Rectangle((0, r['z_ini']), max(q_ult)*1.1, r['Espesor_m'], facecolor=colores.get(r['Tipo'],"white"), alpha=0.3)
+                    rect = patches.Rectangle((0, r['z_ini']), max_q*1.2, r['Espesor_m'], facecolor=colores.get(r['Tipo'],"white"), alpha=0.3)
                     ax2.add_patch(rect)
-                    ax2.text(max(q_ult)*0.05, (r['z_ini']+r['z_fin'])/2, f"{r['Tipo']} ($\\alpha$={r['Alpha_Design']:.0f})", fontsize=8, color='k')
+                    ax2.text(max_q*0.05, (r['z_ini']+r['z_fin'])/2, f"{r['Tipo']} ($\\alpha$={r['Alpha_Design']:.0f})", fontsize=8, color='k')
                 
                 # Curvas
                 ax2.plot(q_adm, z_ax, 'b-', lw=2, label="Q Admisible")
@@ -369,9 +376,9 @@ def app_principal():
                 ax2.axvline(P_u, color='r', ls=':', label="Carga Actuante")
                 
                 # DIBUJO DEL MICROPILOTE
-                rect_mp = patches.Rectangle((max(q_ult)*0.8, 0), max(q_ult)*0.05, L, facecolor='gray', edgecolor='k')
+                rect_mp = patches.Rectangle((max_q*0.8, 0), max_q*0.05, L, facecolor='gray', edgecolor='k')
                 ax2.add_patch(rect_mp)
-                ax2.text(max(q_ult)*0.825, L/2, "MP", rotation=90, color='white', va='center')
+                ax2.text(max_q*0.825, L/2, "MP", rotation=90, color='white', va='center')
                 
                 ax2.invert_yaxis()
                 ax2.set_xlabel("Carga Axial (kN)"); ax2.set_ylabel("Profundidad (m)")
