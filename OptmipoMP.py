@@ -8,7 +8,7 @@ import requests
 import time
 from io import BytesIO
 
-# --- IMPORTACIONES PARA PDF (Asegúrate de tener reportlab en requirements.txt) ---
+# --- IMPORTACIONES PARA PDF ---
 try:
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
@@ -82,10 +82,14 @@ def procesar_geotecnia(df_input):
     z_acum = 0
     for _, row in df_input.iterrows():
         try:
-            esp = float(row.get('Espesor_m', 0)); tipo = row.get('Tipo', 'Arcilla')
-            n_spt = float(row.get('N_SPT', 0)); su = float(row.get('Su_kPa', 0))
-            kh = float(row.get('Kh_kNm3', 0)); a_manual = float(row.get('Alpha_Manual', 0))
-        except: continue
+            # Uso de .get con valor default para evitar KeyError si la columna no existe
+            esp = float(row.get('Espesor_m', 0))
+            tipo = row.get('Tipo', 'Arcilla')
+            n_spt = float(row.get('N_SPT', 0))
+            su = float(row.get('Su_kPa', 0))
+            kh = float(row.get('Kh_kNm3', 0))
+            a_manual = float(row.get('Alpha_Manual', 0))
+        except ValueError: continue
         
         phi = 0; E_MPa = 0; alpha = 0
         if tipo == "Arena":
@@ -186,7 +190,7 @@ def app_principal():
     with st.sidebar:
         st.success(f"Ingeniero: **{st.session_state['datos_usuario'].get('nombre')}**")
         
-        # --- GENERACIÓN PDF (FUNCIONANDO) ---
+        # --- GENERACIÓN PDF ---
         if st.button("📄 Generar Reporte PDF"):
             try:
                 buffer = BytesIO()
@@ -196,7 +200,6 @@ def app_principal():
                 p.drawString(100, 710, f"Empresa: {st.session_state['datos_usuario'].get('empresa')}")
                 p.drawString(100, 680, "Resumen de Resultados:")
                 
-                # Datos de optimización si existen
                 opt = st.session_state.get('design_optimo')
                 if opt:
                     p.drawString(100, 660, f"Configuración Óptima: {opt.get('N')} x D={opt.get('D_mm')}mm")
@@ -223,12 +226,14 @@ def app_principal():
     ])
 
     # --------------------------------------------------------------------------
-    # TAB 1: GEOTECNIA
+    # TAB 1: GEOTECNIA (CORREGIDA)
     # --------------------------------------------------------------------------
     with tab1:
         c1, c2 = st.columns([1.5, 1])
         with c1:
             st.subheader("Caracterización del Subsuelo")
+            
+            # Tabla base
             df_template = pd.DataFrame([
                 {"Espesor_m": 4.0, "Tipo": "Arcilla", "N_SPT": 5, "Su_kPa": 40, "Kh_kNm3": 8000, "Alpha_Manual": 0.0},
                 {"Espesor_m": 8.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 25000, "Alpha_Manual": 0.0},
@@ -240,7 +245,19 @@ def app_principal():
                 num_rows="dynamic", use_container_width=True
             )
             df_geo = procesar_geotecnia(edited_df)
-            st.dataframe(df_geo.style.format("{:.1f}"), use_container_width=True)
+            
+            # --- CORRECCIÓN DEL ERROR DE FORMATO ---
+            # Solo aplicamos formato numérico a las columnas que SON numéricas.
+            # 'Tipo' es string y no debe formatearse.
+            format_dict = {
+                "z_ini": "{:.1f}", "z_fin": "{:.1f}", "Espesor_m": "{:.1f}",
+                "N_SPT": "{:.0f}", "Su_kPa": "{:.1f}", "Kh_kNm3": "{:.0f}",
+                "Alpha_Design": "{:.1f}", "Phi_Deg": "{:.1f}", "E_MPa": "{:.1f}"
+            }
+            # Filtramos el diccionario para usar solo columnas que existen en el dataframe
+            actual_format = {k: v for k, v in format_dict.items() if k in df_geo.columns}
+            
+            st.dataframe(df_geo.style.format(actual_format), use_container_width=True)
             
             layers_objs = []
             for _, r in df_geo.iterrows():
@@ -250,19 +267,13 @@ def app_principal():
 
         with c2:
             if not df_geo.empty:
-                # CORRECCIÓN DE GRÁFICAS: Usar arrays de mismo tamaño
                 fig, axs = plt.subplots(1, 3, figsize=(10, 5), sharey=True)
                 z_plot, n_plot, a_plot = [], [], []
                 
                 for _, r in df_geo.iterrows():
-                    # Punto inicial del estrato
-                    z_plot.append(r['z_ini'])
-                    n_plot.append(r['N_SPT'])
-                    a_plot.append(r['Alpha_Design'])
-                    # Punto final del estrato (para escalón)
-                    z_plot.append(r['z_fin'])
-                    n_plot.append(r['N_SPT'])
-                    a_plot.append(r['Alpha_Design'])
+                    z_plot.extend([r['z_ini'], r['z_fin']])
+                    n_plot.extend([r['N_SPT'], r['N_SPT']])
+                    a_plot.extend([r['Alpha_Design'], r['Alpha_Design']])
                 
                 axs[0].plot(n_plot, z_plot, 'b'); axs[0].set_title("N-SPT"); axs[0].invert_yaxis(); axs[0].grid(True, ls=':')
                 axs[1].plot(a_plot, z_plot, 'r'); axs[1].set_title("Alpha (kPa)"); axs[1].grid(True, ls=':')
@@ -300,7 +311,7 @@ def app_principal():
                     for N in range(3, 16):
                         Q_indiv_req = (Carga_kN / N) * FS_target
                         for L in range(6, 31):
-                            _, _, q_adm_arr = engine.calc_micropile_axial(L, D, 1.0) # FS=1 para obtener Ult
+                            _, _, q_adm_arr = engine.calc_micropile_axial(L, D, 1.0)
                             if len(q_adm_arr) > 0:
                                 Q_ult_cap = q_adm_arr[-1]
                                 if Q_ult_cap >= Q_indiv_req:
@@ -395,7 +406,7 @@ def app_principal():
     # --------------------------------------------------------------------------
     with tab4:
         st.subheader("Diseño de Losa de Cabezal & Punzonamiento")
-        # --- AQUÍ ESTÁ LA CORRECCIÓN DEL ERROR DE LA LOSA ---
+        
         c1, c2 = st.columns(2)
         with c1:
             Bx = st.number_input("Ancho X (m)", 1.0, 20.0, 5.0)
@@ -406,7 +417,6 @@ def app_principal():
             fcl = st.number_input("f'c Losa (MPa)", 21.0, 42.0, 28.0)
             
             Q_unit = 500 # Default
-            # Intentar traer Q admisible del Tab 3
             if 'q_geo_val' in locals() and q_geo_val > 0:
                 Q_unit = q_geo_val
             
@@ -417,11 +427,11 @@ def app_principal():
             
             # Verificación Punzonamiento
             d_eff = H - 0.075
-            bo = np.pi*(0.2 + d_eff) # Asumiendo D=20cm
+            bo = np.pi*(0.2 + d_eff)
             vc = 0.75 * 0.33 * np.sqrt(fcl) * bo * d_eff * 1000
-            pu = Q_unit * 1.4 # Carga factorada
+            pu = Q_unit * 1.4
             
-            # DEFINIR LA VARIABLE RATIO EXPLÍCITAMENTE
+            # Cálculo seguro de ratio
             ratio = pu / vc if vc > 0 else 999
             
             st.write(f"**Carga Pu:** {pu:.1f} kN | **Capacidad phi*Vc:** {vc:.1f} kN")
