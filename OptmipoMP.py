@@ -437,3 +437,4 @@ if st.session_state['usuario_registrado']:
     app_principal()
 else:
     mostrar_registro()
+
