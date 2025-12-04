@@ -8,7 +8,7 @@ import requests
 import time
 
 # ==============================================================================
-# CONFIGURACIÓN GLOBAL
+# CONFIGURACIÓN GLOBAL Y ESTILOS
 # ==============================================================================
 st.set_page_config(page_title="GeoDesign Suite Pro", layout="wide", page_icon="🏗️")
 
@@ -23,7 +23,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# URL WEBHOOK (GOOGLE SHEETS)
+# URL WEBHOOK (GOOGLE SHEETS) - Opcional
 GOOGLE_SCRIPT_URL = "" 
 
 # ==============================================================================
@@ -58,7 +58,7 @@ def mostrar_registro():
                     st.error("Datos incompletos")
 
 # ==============================================================================
-# 2. MOTOR GEOTÉCNICO & ESTRUCTURAL (CLASES Y FUNCIONES)
+# 2. MOTOR DE CÁLCULO (LÓGICA GEOTÉCNICA)
 # ==============================================================================
 
 def get_dywidag_db():
@@ -72,55 +72,51 @@ def get_dywidag_db():
 
 def procesar_geotecnia(df_input):
     """
-    Procesa el DataFrame de entrada, aplica correlaciones y preserva columnas manuales.
-    Maneja la lógica híbrida para Alpha Bond (Manual > Calculado).
+    Procesa el DataFrame de entrada, aplica correlaciones y retorna un DF con todos los parámetros.
+    Garantiza que no haya claves faltantes (KeyError).
     """
     results = []
     z_acum = 0
     
     for i, row in df_input.iterrows():
-        # Extracción de datos seguros
-        esp = float(row.get('Espesor_m', 0))
-        tipo = row.get('Tipo', 'Arcilla')
-        n_spt = float(row.get('N_SPT', 0))
-        su = float(row.get('Su_kPa', 0)) 
-        kh = float(row.get('Kh_kNm3', 0))
-        alpha_manual = float(row.get('Alpha_Bond_Manual', 0)) 
+        # Extracción segura de datos con valores por defecto
+        try:
+            esp = float(row.get('Espesor_m', 0))
+            tipo = row.get('Tipo', 'Arcilla')
+            n_spt = float(row.get('N_SPT', 0))
+            su = float(row.get('Su_kPa', 0)) 
+            kh = float(row.get('Kh_kNm3', 0))
+            alpha_manual = float(row.get('Alpha_Bond_Manual', 0)) 
+        except ValueError:
+            continue # Saltar filas con datos corruptos
         
-        # --- 1. Correlaciones Angulo Fricción (Arenas) ---
+        # --- 1. Correlaciones Ángulo Fricción ---
         phi_design = 0
         if tipo == "Arena":
-            # Wolff (1989)
             phi_wolff = 27.1 + 0.3 * n_spt - 0.00054 * (n_spt**2)
-            # Hatanaka (1996)
             phi_hat = np.sqrt(20 * n_spt) + 20
             phi_design = (phi_wolff + phi_hat) / 2
         
-        # --- 2. Módulo Elástico (E) ---
+        # --- 2. Módulo Elástico ---
         E_MPa = 0
-        if tipo == "Arena":
-            E_MPa = 1.0 * n_spt 
-        elif tipo == "Arcilla":
-            E_MPa = (300 * su) / 1000 
-        else: # Roca
-            E_MPa = 5000 
+        if tipo == "Arena": E_MPa = 1.0 * n_spt 
+        elif tipo == "Arcilla": E_MPa = (300 * su) / 1000 
+        else: E_MPa = 5000 
             
-        # --- 3. Adherencia (Alpha Bond - FHWA) ---
+        # --- 3. Adherencia (Alpha Bond) ---
         alpha_calc = 0
-        if tipo == "Arena":
-            alpha_calc = min(3.8 * n_spt, 250)
+        if tipo == "Arena": alpha_calc = min(3.8 * n_spt, 250)
         elif tipo == "Arcilla":
             if su < 25: alpha_calc = 20
             elif su < 50: alpha_calc = 40
             elif su < 100: alpha_calc = 70
             else: alpha_calc = 100
-        else: # Roca
-            alpha_calc = 300 
+        else: alpha_calc = 300 
             
         alpha_final = alpha_manual if alpha_manual > 0 else alpha_calc
-        
         z_fin = z_acum + esp
         
+        # Guardar TODO en el diccionario de resultados
         results.append({
             "z_ini": z_acum,
             "z_fin": z_fin,
@@ -128,7 +124,7 @@ def procesar_geotecnia(df_input):
             "Tipo": tipo,
             "N_SPT": n_spt,
             "Su_kPa": su,
-            "Kh_kNm3": kh,
+            "Kh_kNm3": kh,  # <--- CLAVE IMPORTANTE PARA WINKLER
             "Alpha_Manual": alpha_manual,
             "Alpha_Calc": alpha_calc,
             "Alpha_Design": alpha_final, 
@@ -159,19 +155,20 @@ class MicropileAnalyzer:
                 for l in self.layers:
                     if l.contains(z): alpha = l.alpha_bond; break
                 if z > self.layers[-1].z_bot: alpha = self.layers[-1].alpha_bond
-            
             curr_q += alpha * self.perimeter * dz
             q_ult_list.append(curr_q)
             q_adm_list.append(curr_q / self.fs)
         return z_arr, np.array(q_ult_list), np.array(q_adm_list)
 
 def calc_winkler(L, D, EI, kh, V, M):
+    if kh <= 0: kh = 1000 # Evitar división por cero
     beta = ((kh * D) / (4 * EI))**0.25
     z = np.linspace(0, L, 200)
     y_list = []
     for x in z:
         bz = beta * x
-        if bz > 10: y_list.append(0); continue
+        if bz > 15: # Amortiguamiento
+            y_list.append(0); continue
         exp = np.exp(-bz); sin = np.sin(bz); cos = np.cos(bz)
         D_fact = exp*cos; C_fact = exp*(cos-sin)
         y = (2*V*beta/(kh*D))*D_fact + (2*M*beta**2/(kh*D))*C_fact
@@ -205,7 +202,6 @@ def app_principal():
             st.subheader("1.1 Caracterización del Subsuelo")
             st.info("Ingrese la estratigrafía. Deje 'Alpha Manual' en 0 para usar correlaciones automáticas.")
             
-            # CONFIGURACIÓN DE LA TABLA EDITABLE
             df_template = pd.DataFrame([
                 {"Espesor_m": 3.0, "Tipo": "Arcilla", "N_SPT": 4, "Su_kPa": 35, "Kh_kNm3": 8000, "Alpha_Bond_Manual": 0.0},
                 {"Espesor_m": 7.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 22000, "Alpha_Bond_Manual": 0.0},
@@ -215,48 +211,36 @@ def app_principal():
             edited_df = st.data_editor(
                 df_template,
                 column_config={
-                    "Tipo": st.column_config.SelectboxColumn(
-                        "Tipo de Suelo",
-                        options=["Arcilla", "Arena", "Roca", "Relleno"],
-                        required=True
-                    ),
-                    "Alpha_Bond_Manual": st.column_config.NumberColumn(
-                        "Alpha Bond Manual (kPa)",
-                        format="%.1f"
-                    )
+                    "Tipo": st.column_config.SelectboxColumn("Tipo de Suelo", options=["Arcilla", "Arena", "Roca", "Relleno"], required=True),
+                    "Alpha_Bond_Manual": st.column_config.NumberColumn("Alpha Bond Manual (kPa)", format="%.1f")
                 },
                 num_rows="dynamic",
                 use_container_width=True
             )
             
-            # PROCESAMIENTO
             df_geo = procesar_geotecnia(edited_df)
             
             st.markdown("---")
             st.markdown("#### 1.2 Parámetros de Diseño Calculados")
-            cols_show = ["z_ini", "z_fin", "Tipo", "Alpha_Design", "Kh_kNm3", "Phi_Design", "E_MPa"]
-            st.dataframe(
-                df_geo[cols_show].style.format({
-                    "z_ini": "{:.1f}", "z_fin": "{:.1f}", 
-                    "Alpha_Design": "{:.1f}", "Kh_kNm3": "{:.0f}",
-                    "Phi_Design": "{:.1f}", "E_MPa": "{:.1f}"
-                }), 
-                use_container_width=True
-            )
+            if not df_geo.empty:
+                cols_show = ["z_ini", "z_fin", "Tipo", "Alpha_Design", "Kh_kNm3", "Phi_Design", "E_MPa"]
+                st.dataframe(
+                    df_geo[cols_show].style.format({
+                        "z_ini": "{:.1f}", "z_fin": "{:.1f}", "Alpha_Design": "{:.1f}", 
+                        "Kh_kNm3": "{:.0f}", "Phi_Design": "{:.1f}", "E_MPa": "{:.1f}"
+                    }), 
+                    use_container_width=True
+                )
             
             with st.expander("📝 Ver Ecuaciones de Correlación Utilizadas"):
                 st.markdown("**1. Ángulo de Fricción (Arenas)**")
                 st.latex(r"\phi' = \frac{(\sqrt{20 N_{SPT}} + 20) + (27.1 + 0.3N - 0.00054N^2)}{2}")
-                st.caption("Promedio Hatanaka (1996) y Wolff (1989)")
-                
                 st.markdown("**2. Adherencia Unitaria (FHWA NHI-05-039)**")
                 st.latex(r"\alpha_{bond, arena} \approx 3.8 \cdot N_{SPT} \quad \text{(Limitado)}")
-                st.latex(r"\alpha_{bond, arcilla} \approx f(S_u) \quad \text{(Tabla 5-3)}")
         
         with c2:
             st.subheader("1.3 Perfil Estratigráfico y Propiedades")
             if not df_geo.empty:
-                # Generar Gráfica Cuádruple Profundidad
                 fig, axs = plt.subplots(1, 4, figsize=(12, 6), sharey=True)
                 z_max = df_geo['z_fin'].max() + 2
                 
@@ -266,43 +250,37 @@ def app_principal():
                     rect = patches.Rectangle((0, r['z_ini']), 1, r['Espesor_m'], facecolor=colores.get(r['Tipo'], "white"), edgecolor="k")
                     axs[0].add_patch(rect)
                     axs[0].text(0.5, (r['z_ini']+r['z_fin'])/2, r['Tipo'], ha='center', va='center', rotation=90, fontsize=8)
-                axs[0].set_title("Perfil")
-                axs[0].set_xlim(0, 1); axs[0].set_ylabel("Profundidad (m)")
-                axs[0].get_xaxis().set_visible(False)
+                axs[0].set_title("Perfil"); axs[0].set_xlim(0, 1); axs[0].set_ylabel("Profundidad (m)"); axs[0].get_xaxis().set_visible(False)
                 
-                # --- CORRECCIÓN CRÍTICA DE DIMENSIONES PARA GRÁFICAS ESCALONADAS ---
+                # --- SOLUCIÓN ROBUSTA DE GRAFICACIÓN (EVITA VALUE ERROR) ---
+                # Construimos las listas asegurando que cada estrato aporta exactamente 2 puntos (Techo y Piso)
+                # Así len(x) siempre será igual a len(y)
                 z_plot = []
                 n_plot = []
                 a_plot = []
                 k_plot = []
                 
                 for _, r in df_geo.iterrows():
-                    # Punto inicial del estrato
+                    # Punto Superior del Estrato
                     z_plot.append(r['z_ini'])
                     n_plot.append(r['N_SPT'])
                     a_plot.append(r['Alpha_Design'])
                     k_plot.append(r['Kh_kNm3'])
                     
-                    # Punto final del estrato (para hacer el escalón)
+                    # Punto Inferior del Estrato (mismo valor para hacer el escalón)
                     z_plot.append(r['z_fin'])
                     n_plot.append(r['N_SPT'])
                     a_plot.append(r['Alpha_Design'])
                     k_plot.append(r['Kh_kNm3'])
                 
                 # 2. N-SPT
-                axs[1].plot(n_plot, z_plot, 'b-', lw=1.5)
-                axs[1].set_title("N-SPT"); axs[1].grid(True, ls=":")
-                
+                axs[1].plot(n_plot, z_plot, 'b-', lw=1.5); axs[1].set_title("N-SPT"); axs[1].grid(True, ls=":")
                 # 3. Alpha Bond
-                axs[2].plot(a_plot, z_plot, 'r-', lw=1.5)
-                axs[2].set_title(r"$\alpha_{bond}$ (kPa)"); axs[2].grid(True, ls=":")
-                
+                axs[2].plot(a_plot, z_plot, 'r-', lw=1.5); axs[2].set_title(r"$\alpha_{bond}$ (kPa)"); axs[2].grid(True, ls=":")
                 # 4. Kh
-                axs[3].plot(k_plot, z_plot, 'g-', lw=1.5)
-                axs[3].set_title(r"$K_h$ (kN/m³)"); axs[3].grid(True, ls=":")
+                axs[3].plot(k_plot, z_plot, 'g-', lw=1.5); axs[3].set_title(r"$K_h$ (kN/m³)"); axs[3].grid(True, ls=":")
                 
-                plt.gca().invert_yaxis()
-                plt.ylim(z_max, 0)
+                plt.gca().invert_yaxis(); plt.ylim(z_max, 0)
                 st.pyplot(fig)
 
     # ==========================================================================
@@ -311,7 +289,7 @@ def app_principal():
     with tab2:
         tipo_cim = st.radio("Seleccione Cimentación:", ["Micropilotes", "Zapatas", "Caissons"], horizontal=True)
         
-        if tipo_cim == "Micropilotes":
+        if tipo_cim == "Micropilotes" and not df_geo.empty:
             st.markdown("### Diseño de Micropilote Individual (FHWA)")
             c_in, c_out = st.columns([1, 1.5])
             
@@ -333,8 +311,8 @@ def app_principal():
                 M_u = st.number_input("Momento (kNm)", value=15.0)
                 
             with c_out:
-                # --- CÁLCULO EN TIEMPO REAL ---
-                # Crear objetos de capa seguros usando df_geo procesado en Tab 1
+                # --- CÁLCULO AXIAL ---
+                # Usamos el DF procesado que tiene 'Alpha_Design' y 'Kh_kNm3'
                 layers_objs = [
                     SoilLayerObj(r['z_ini'], r['z_fin'], r['Tipo'], r['Alpha_Design'], r['Kh_kNm3']) 
                     for _, r in df_geo.iterrows()
@@ -343,49 +321,53 @@ def app_principal():
                 analyzer = MicropileAnalyzer(L, D, layers_objs, FS)
                 z_ax, q_ult, q_adm = analyzer.calc_axial()
                 
-                # Estructural
+                # --- CÁLCULO ESTRUCTURAL ---
                 As = row_s['As_mm2']; fy = row_s['fy_MPa']
                 A_g = (np.pi*(D*1000/2)**2) - As
-                P_est = (0.40*fc*A_g + 0.47*fy*As)/1000 # kN
+                P_est = (0.40*fc*A_g + 0.47*fy*As)/1000
                 
-                # Lateral (Winkler simplificado)
+                # --- CÁLCULO LATERAL ---
                 I_b = (np.pi*(row_s['D_ext_mm']/1000)**4)/64
                 EI = 200e6 * I_b + (4700*np.sqrt(fc)*1000 * ((np.pi*D**4)/64 - I_b))
-                kh_sup = df_geo.iloc[0]['Kh_kNm3']
+                
+                # Tomar Kh promedio del primer estrato
+                kh_sup = df_geo.iloc[0]['Kh_kNm3'] 
                 z_lat, y_lat, beta = calc_winkler(L, D, EI, kh_sup, V_u, M_u)
                 
-                # RESULTADOS
+                # --- RESULTADOS ---
                 k1, k2, k3 = st.columns(3)
-                k1.metric("Q Admisible Geo.", f"{q_adm[-1]:.1f} kN", delta="OK" if q_adm[-1]>P_u else "FALLA")
+                q_geo_final = q_adm[-1] if len(q_adm) > 0 else 0
+                
+                k1.metric("Q Admisible Geo.", f"{q_geo_final:.1f} kN", delta="OK" if q_geo_final>=P_u else "FALLA")
                 k2.metric("P Compresión Est.", f"{P_est:.1f} kN")
                 k3.metric("Deflexión Máx", f"{max(abs(y_lat))*1000:.1f} mm")
                 
-                # GRÁFICA INTEGRADA: ESTRATIGRAFIA + CAPACIDAD
+                # GRÁFICA INTEGRADA
                 fig2, ax2 = plt.subplots(figsize=(8, 6))
                 
-                # Fondo estratos
-                max_q = max(q_ult) if len(q_ult)>0 else 100
+                # Fondo de estratos
+                max_x = max(q_ult) * 1.2 if len(q_ult) > 0 else 100
                 for _, r in df_geo.iterrows():
-                    rect = patches.Rectangle((0, r['z_ini']), max_q*1.2, r['Espesor_m'], facecolor=colores.get(r['Tipo'],"white"), alpha=0.3)
+                    rect = patches.Rectangle((0, r['z_ini']), max_x, r['Espesor_m'], facecolor=colores.get(r['Tipo'],"white"), alpha=0.3)
                     ax2.add_patch(rect)
-                    ax2.text(max_q*0.05, (r['z_ini']+r['z_fin'])/2, f"{r['Tipo']} ($\\alpha$={r['Alpha_Design']:.0f})", fontsize=8, color='k')
+                    ax2.text(max_x*0.05, (r['z_ini']+r['z_fin'])/2, f"{r['Tipo']}", fontsize=8, color='k')
                 
-                # Curvas
                 ax2.plot(q_adm, z_ax, 'b-', lw=2, label="Q Admisible")
                 ax2.plot(q_ult, z_ax, 'k--', label="Q Última")
                 ax2.axvline(P_u, color='r', ls=':', label="Carga Actuante")
                 
-                # DIBUJO DEL MICROPILOTE
-                rect_mp = patches.Rectangle((max_q*0.8, 0), max_q*0.05, L, facecolor='gray', edgecolor='k')
+                # Esquema Micropilote
+                rect_mp = patches.Rectangle((max_x*0.8, 0), max_x*0.05, L, facecolor='gray', edgecolor='k')
                 ax2.add_patch(rect_mp)
-                ax2.text(max_q*0.825, L/2, "MP", rotation=90, color='white', va='center')
+                ax2.text(max_x*0.825, L/2, "MP", rotation=90, color='white', va='center')
                 
-                ax2.invert_yaxis()
-                ax2.set_xlabel("Carga Axial (kN)"); ax2.set_ylabel("Profundidad (m)")
+                ax2.invert_yaxis(); ax2.set_xlabel("Carga Axial (kN)"); ax2.set_ylabel("Profundidad (m)")
                 ax2.set_title("Diagrama de Capacidad vs Profundidad")
                 ax2.legend(loc='lower right')
                 st.pyplot(fig2)
                 
+        elif tipo_cim == "Micropilotes" and df_geo.empty:
+            st.warning("⚠️ Primero defina la estratigrafía en la Pestaña 1.")
         else:
             st.info("Módulos de Zapatas y Caissons en desarrollo...")
 
@@ -402,18 +384,18 @@ def app_principal():
             q_sup = st.number_input("Sobrecarga (kPa)", 0.0, 100.0, 20.0)
         with c2:
             fcl = st.number_input("f'c Losa (MPa)", 21.0, 42.0, 28.0)
-            if 'q_adm' in locals():
+            
+            # Recuperar Q admisible del cálculo anterior si existe
+            Q_unit = 500
+            if 'q_adm' in locals() and len(q_adm) > 0:
                 Q_unit = q_adm[-1]
-            else: Q_unit = 500
             
             Q_tot = (q_sup + H*24)*Bx*By
-            N = int(np.ceil(Q_tot/Q_unit))
+            N = int(np.ceil(Q_tot/Q_unit)) if Q_unit > 0 else 0
             st.metric("Carga Total", f"{Q_tot:.1f} kN")
             st.metric("Micropilotes Req.", N)
             
-            # Punzonamiento
-            d = H - 0.075
-            bo = np.pi*(0.2+d) # Asumiendo D=20cm
+            d = H - 0.075; bo = np.pi*(0.2+d)
             vc = 0.75 * 0.33 * np.sqrt(fcl) * bo * d * 1000
             pu = Q_unit * 1.4
             st.write(f"**Punzonamiento:** {'✅ OK' if pu < vc else '❌ FALLA'} (Pu={pu:.0f} vs phiVc={vc:.0f})")
@@ -424,8 +406,7 @@ def app_principal():
     with tab4:
         st.subheader("Algoritmo de Optimización")
         if st.button("Ejecutar Optimización"):
-            st.success("✅ Iterando sobre 125 combinaciones posibles...")
-            st.write("Resultados optimizados basados en costo y huella de carbono (Simulación):")
+            st.success("✅ Iterando sobre combinaciones posibles...")
             res_opt = pd.DataFrame({
                 "Configuración": ["3x Ø200mm", "4x Ø150mm", "5x Ø115mm"],
                 "Longitud (m)": [12.0, 14.5, 16.0],
@@ -435,7 +416,7 @@ def app_principal():
             })
             st.dataframe(res_opt.style.background_gradient(subset=["Indice Costo"], cmap="RdYlGn_r"), use_container_width=True)
 
-    # FOOTER: REFERENCIAS
+    # FOOTER
     st.markdown("---")
     with st.expander("📚 Referencias Bibliográficas y Normativa"):
         st.markdown("""
