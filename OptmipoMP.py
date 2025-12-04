@@ -1,7 +1,6 @@
 import streamlit as st
-import numpy as np
 import pandas as pd
-import math
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from dataclasses import dataclass
@@ -225,7 +224,15 @@ def app_principal():
             # Calcular Correlaciones
             df_geo = calcular_correlaciones(edited_df)
             st.markdown("##### 📊 Parámetros Correlacionados")
-            st.dataframe(df_geo[["z_ini", "z_fin", "Tipo", "Phi_Design", "E_MPa", "Alpha_Bond_kPa"]].style.format("{:.1f}"), use_container_width=True)
+            
+            # --- CORRECCIÓN AQUI: Formato especifico por columnas para evitar error con texto ---
+            st.dataframe(
+                df_geo[["z_ini", "z_fin", "Tipo", "Phi_Design", "E_MPa", "Alpha_Bond_kPa"]].style.format({
+                    "z_ini": "{:.1f}", "z_fin": "{:.1f}", 
+                    "Phi_Design": "{:.1f}", "E_MPa": "{:.1f}", "Alpha_Bond_kPa": "{:.1f}"
+                }), 
+                use_container_width=True
+            )
             
             # Tabla de Referencia
             with st.expander("📚 Ver Tabla de Referencia FHWA (Valores Típicos)"):
