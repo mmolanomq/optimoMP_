@@ -22,60 +22,89 @@ st.set_page_config(page_title="Micropile Pro Optimizer", layout="wide", page_ico
 
 st.markdown("""
 <style>
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] {
-        height: 50px; background-color: #f1f3f6; border-radius: 5px 5px 0px 0px;
-        padding: 10px; font-weight: 600;
+        height: 50px; white-space: pre-wrap; background-color: #f0f2f6;
+        border-radius: 5px 5px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px;
     }
-    .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 3px solid #0047AB; }
+    .stTabs [aria-selected="true"] { background-color: #FFFFFF; border-bottom: 2px solid #0047AB; }
     h1, h2, h3 { color: #2C3E50; }
 </style>
 """, unsafe_allow_html=True)
 
-# VARIABLES DE ESTADO
-if 'usuario_registrado' not in st.session_state: st.session_state['usuario_registrado'] = False
-if 'datos_usuario' not in st.session_state: st.session_state['datos_usuario'] = {}
-if 'df_geo' not in st.session_state: st.session_state['df_geo'] = pd.DataFrame()
-if 'opt_result' not in st.session_state: st.session_state['opt_result'] = {} 
+GOOGLE_SCRIPT_URL = ""  # Pega tu URL de Google Apps Script
 
 # ==============================================================================
-# 1. BASE DE DATOS Y CLASES
+# 1. SISTEMA DE REGISTRO & ESTADO
+# ==============================================================================
+if 'usuario_registrado' not in st.session_state: st.session_state['usuario_registrado'] = False
+if 'datos_usuario' not in st.session_state: st.session_state['datos_usuario'] = {}
+# Inicialización segura de variables globales
+if 'design_optimo' not in st.session_state: st.session_state['design_optimo'] = {}
+if 'layers_objs' not in st.session_state: st.session_state['layers_objs'] = []
+if 'df_geo' not in st.session_state: st.session_state['df_geo'] = pd.DataFrame()
+
+def enviar_a_google_sheets(datos):
+    if not GOOGLE_SCRIPT_URL: return True
+    try:
+        requests.post(GOOGLE_SCRIPT_URL, json=datos, timeout=3)
+        return True
+    except: return False
+
+def mostrar_registro():
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown("## 🔒 MicroPile Pro Optimizer")
+        st.info("Herramienta especializada en diseño y optimización de micropilotes.")
+        with st.form("reg"):
+            nombre = st.text_input("Nombre")
+            empresa = st.text_input("Empresa")
+            email = st.text_input("Email")
+            if st.form_submit_button("INGRESAR"):
+                if nombre and email:
+                    st.session_state['usuario_registrado'] = True
+                    st.session_state['datos_usuario'] = {'nombre': nombre, 'empresa': empresa}
+                    enviar_a_google_sheets({'nombre': nombre, 'email': email, 'fecha': time.strftime("%Y-%m-%d")})
+                    st.rerun()
+                else: st.error("Complete los datos requeridos.")
+
+# ==============================================================================
+# 2. MOTOR CIENTÍFICO (DYWIDAG & GEOTECNIA)
 # ==============================================================================
 
 def get_dywidag_db():
-    """Catálogo Dywidag (Solo R y T)."""
+    """Catálogo Dywidag (DSI) - Hollow Bars (Sin Titan)."""
     data = {
-        "Sistema": ["R32-280", "R32-360", "R38-500", "R51-660", "R51-800", "T76-1200", "T76-1600"],
-        "D_ext_mm": [32, 32, 38, 51, 51, 76, 76],
-        "As_mm2": [410, 510, 750, 970, 1150, 1610, 1990],
-        "fy_MPa": [535, 550, 533, 555, 556, 620, 600]
+        "Sistema": ["R32-280", "R32-360", "R38-500", "R38-550", "R51-660", "R51-800", "T76-1200", "T76-1600"],
+        "D_ext_mm": [32, 32, 38, 38, 51, 51, 76, 76],
+        "As_mm2": [410, 510, 750, 800, 970, 1150, 1610, 1990],
+        "fy_MPa": [535, 550, 533, 560, 555, 556, 620, 600]
     }
     return pd.DataFrame(data)
 
 @dataclass
-class SoilLayer:
-    z_top: float; z_bot: float; tipo: str; alpha: float; kh: float; f_exp: float
+class SoilLayerObj:
+    z_top: float; z_bot: float; tipo: str; alpha: float; kh: float
     def contains(self, z): return self.z_top <= z <= self.z_bot
 
-def procesar_geotecnia(df):
-    """Calcula parámetros correlacionados si no se ingresan manualmente."""
-    res = []
+def procesar_geotecnia(df_input):
+    """Calcula Alpha Bond, Phi y E basado en inputs."""
+    results = []
     z_acum = 0
-    for _, row in df.iterrows():
+    for _, row in df_input.iterrows():
         try:
             esp = float(row.get('Espesor_m', 0)); tipo = row.get('Tipo', 'Arcilla')
-            n = float(row.get('N_SPT', 0)); su = float(row.get('Su_kPa', 0))
-            kh = float(row.get('Kh_kNm3', 0)); a_man = float(row.get('Alpha_Manual', 0))
-            f_exp = float(row.get('F_Exp', 1.2))
+            n_spt = float(row.get('N_SPT', 0)); su = float(row.get('Su_kPa', 0))
+            kh = float(row.get('Kh_kNm3', 0)); a_manual = float(row.get('Alpha_Manual', 0))
         except: continue
-
+        
         phi = 0; E_MPa = 0; alpha = 0
         
         # Correlaciones (Wolff, Kulhawy, FHWA)
         if tipo == "Arena":
-            phi = ((np.sqrt(20*n)+20) + (27.1+0.3*n-0.00054*n**2))/2
-            E_MPa = 1.0 * n
-            alpha = min(3.8 * n, 250)
+            phi = ((np.sqrt(20*n_spt)+20) + (27.1+0.3*n_spt-0.00054*n_spt**2))/2
+            E_MPa = 1.0 * n_spt
+            alpha = min(3.8 * n_spt, 250)
         elif tipo == "Arcilla":
             E_MPa = 0.3 * su
             if su < 25: alpha = 20
@@ -83,25 +112,43 @@ def procesar_geotecnia(df):
             elif su < 100: alpha = 70
             else: alpha = 100
         else: # Roca
-            E_MPa = 5000; alpha = 300; f_exp = 1.0
+            E_MPa = 5000; alpha = 300
             
-        a_fin = a_man if a_man > 0 else alpha
+        a_final = a_manual if a_manual > 0 else alpha
         z_fin = z_acum + esp
         
-        res.append({
+        results.append({
             "z_ini": z_acum, "z_fin": z_fin, "Espesor_m": esp, "Tipo": tipo,
-            "N_SPT": n, "Kh_kNm3": kh, "Alpha_Design": a_fin, 
-            "Phi_Deg": phi, "E_MPa": E_MPa, "f_exp": f_exp
+            "N_SPT": n_spt, "Su_kPa": su, "Kh_kNm3": kh, "Alpha_Design": a_final,
+            "Phi_Deg": phi, "E_MPa": E_MPa, "f_exp": 1.2 # Factor expansión default
         })
         z_acum = z_fin
-    return pd.DataFrame(res)
+    return pd.DataFrame(results)
 
-def calc_winkler(L, D, EI, V, M, layers_list):
-    """Solución analítica Winkler (Beam on Elastic Foundation)."""
-    if not layers_list: return np.array([]), np.array([]), np.array([]), np.array([]), 0
+def calc_micropile_axial(L, D, layers, fs):
+    """Integra la capacidad por fuste (Bond)."""
+    perim = np.pi * D
+    z_arr = np.linspace(0, L, 100)
+    q_ult = []; curr = 0
     
-    # Tomamos Kh del primer estrato representativo
-    kh = layers_list[0]['Kh_kNm3'] if layers_list[0]['Kh_kNm3'] > 0 else 5000
+    for z in z_arr:
+        alpha = 0
+        if z > 0:
+            for l in layers:
+                if l.contains(z): alpha = l.alpha; break
+            if layers and z > layers[-1].z_bot: alpha = layers[-1].alpha
+            
+        curr += alpha * perim * (L/100) # Integration step
+        q_ult.append(curr)
+        
+    return z_arr, np.array(q_ult), np.array(q_ult)/fs
+
+def calc_winkler(L, D, EI, V, M, layers):
+    """Modelo de Viga sobre Fundación Elástica (Winkler)."""
+    if not layers: return np.array([]), np.array([]), np.array([]), np.array([]), 0
+    
+    # Kh simplificado (promedio superior)
+    kh = layers[0].kh if layers[0].kh > 0 else 5000
     
     beta = ((kh * D) / (4 * EI))**0.25
     z = np.linspace(0, L, 200)
@@ -109,15 +156,15 @@ def calc_winkler(L, D, EI, V, M, layers_list):
     
     for x in z:
         bz = beta * x
-        if bz > 20: 
+        if bz > 15: 
             y.append(0); m_res.append(0); v_res.append(0); continue
         
         exp = np.exp(-bz); sin = np.sin(bz); cos = np.cos(bz)
-        A = exp*(cos+sin); B = exp*sin; C = exp*(cos-sin); D_f = exp*cos
+        A = exp*(cos+sin); B = exp*sin; C = exp*(cos-sin); D_fact = exp*cos
         
-        y_val = (2*V*beta/(kh*D))*D_f + (2*M*beta**2/(kh*D))*C
+        y_val = (2*V*beta/(kh*D))*D_fact + (2*M*beta**2/(kh*D))*C
         m_val = (V/beta)*B + M*A
-        v_val = V*C - 2*M*beta*D_f
+        v_val = V*C - 2*M*beta*D_fact
         
         y.append(y_val); m_res.append(m_val); v_res.append(v_val)
         
@@ -127,60 +174,90 @@ def calc_winkler(L, D, EI, V, M, layers_list):
 # 3. INTERFAZ PRINCIPAL
 # ==============================================================================
 def app_principal():
+    # --- SIDEBAR ---
     with st.sidebar:
         st.success(f"Ingeniero: **{st.session_state['datos_usuario'].get('nombre')}**")
+        
+        if st.button("📄 Generar Reporte PDF"):
+            try:
+                buffer = BytesIO()
+                p = canvas.Canvas(buffer, pagesize=letter)
+                p.drawString(100, 750, "REPORTE DE DISEÑO - MICROPILE PRO")
+                p.drawString(100, 730, f"Usuario: {st.session_state['datos_usuario'].get('nombre')}")
+                p.drawString(100, 710, f"Empresa: {st.session_state['datos_usuario'].get('empresa')}")
+                
+                opt = st.session_state.get('design_optimo')
+                if opt:
+                    p.drawString(100, 680, "RESUMEN OPTIMIZACIÓN:")
+                    p.drawString(100, 660, f"- Configuración: {opt.get('N')} micropilotes x D={opt.get('D_mm')}mm")
+                    p.drawString(100, 640, f"- Longitud: {opt.get('L_m')} m")
+                    p.drawString(100, 620, f"- Huella CO2: {opt.get('CO2_ton'):.2f} Ton")
+                else:
+                    p.drawString(100, 680, "Nota: No se ha ejecutado la optimización.")
+                
+                p.showPage()
+                p.save()
+                st.download_button("Descargar Reporte", buffer, "Reporte_Micropilotes.pdf", "application/pdf")
+            except Exception as e:
+                st.error("Error al generar PDF. Verifique reportlab.")
+
         if st.button("Cerrar Sesión"):
             st.session_state['usuario_registrado'] = False; st.rerun()
 
-    st.title("🏗️ Micropile Pro Optimizer")
+    st.title("🏗️ MicroPile Pro Optimizer")
     
     tab1, tab2, tab3 = st.tabs([
-        "🌍 1. Geotecnia Detallada", 
+        "🌍 1. Información Geotécnica", 
         "🚀 2. Optimizador de Diseño", 
-        "📐 3. Diseño Detallado & Reporte"
+        "📐 3. Diseño Detallado & Planos"
     ])
 
     # --------------------------------------------------------------------------
-    # TAB 1: GEOTECNIA
+    # TAB 1: GEOTECNIA (ENTRADA Y VISUALIZACIÓN)
     # --------------------------------------------------------------------------
     with tab1:
         c1, c2 = st.columns([1.3, 1])
         with c1:
-            st.subheader("1.1 Perfil Estratigráfico")
-            st.info("Defina las capas. Deje 'Alpha Manual' en 0 para usar correlación automática.")
+            st.subheader("1.1 Estratigrafía y Parámetros")
+            st.info("Ingrese el perfil del suelo. El 'Alpha Bond' se calcula automáticamente a menos que ingrese un valor manual.")
             
-            df_def = pd.DataFrame([
-                {"Espesor_m": 4.0, "Tipo": "Arcilla", "N_SPT": 5, "Su_kPa": 40, "Kh_kNm3": 8000, "Alpha_Manual": 0.0, "F_Exp": 1.1},
-                {"Espesor_m": 8.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 25000, "Alpha_Manual": 0.0, "F_Exp": 1.2},
-                {"Espesor_m": 6.0, "Tipo": "Roca", "N_SPT": 50, "Su_kPa": 0, "Kh_kNm3": 90000, "Alpha_Manual": 450.0, "F_Exp": 1.0},
+            df_template = pd.DataFrame([
+                {"Espesor_m": 4.0, "Tipo": "Arcilla", "N_SPT": 5, "Su_kPa": 40, "Kh_kNm3": 8000, "Alpha_Manual": 0.0},
+                {"Espesor_m": 8.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 25000, "Alpha_Manual": 0.0},
+                {"Espesor_m": 6.0, "Tipo": "Roca", "N_SPT": 50, "Su_kPa": 0, "Kh_kNm3": 90000, "Alpha_Manual": 400.0},
             ])
             
             edited_df = st.data_editor(
-                df_def,
-                column_config={
-                    "Tipo": st.column_config.SelectboxColumn(options=["Arcilla", "Arena", "Roca", "Relleno"]),
-                    "F_Exp": st.column_config.NumberColumn("Factor Expansión", min_value=1.0, step=0.1)
-                },
+                df_template, 
+                column_config={"Tipo": st.column_config.SelectboxColumn(options=["Arcilla", "Arena", "Roca", "Relleno"])},
                 num_rows="dynamic", use_container_width=True
             )
             
             df_geo = procesar_geotecnia(edited_df)
-            st.session_state['df_geo'] = df_geo # Guardar para Optimizador
             
-            st.markdown("#### Parámetros Calculados")
-            st.dataframe(df_geo[["z_ini", "z_fin", "Tipo", "Alpha_Design", "Kh_kNm3"]].style.format("{:.1f}"), use_container_width=True)
+            # Guardar en sesión
+            st.session_state['df_geo'] = df_geo
+            layers_objs = []
+            for _, r in df_geo.iterrows():
+                layers_objs.append(SoilLayerObj(r['z_ini'], r['z_fin'], r['Tipo'], r['Alpha_Design'], r['Kh_kNm3']))
+            st.session_state['layers_objs'] = layers_objs
             
-            st.markdown("#### Ecuaciones de Correlación")
-            st.latex(r"\phi'_{arena} = [(\sqrt{20 N} + 20) + (27.1 + 0.3N - 0.00054N^2)] / 2")
-            st.latex(r"\alpha_{bond} = \min(3.8 N, 250) \text{ (Arena)} \quad | \quad \alpha_{bond} = f(S_u) \text{ (Arcilla, FHWA)}")
+            st.markdown("#### Parámetros de Diseño Calculados")
+            fmt = {c: "{:.1f}" for c in ["z_ini", "z_fin", "Alpha_Design", "Phi_Deg", "E_MPa"]}
+            st.dataframe(df_geo.style.format(fmt), use_container_width=True)
+            
+            with st.expander("Ver Ecuaciones de Correlación Utilizadas"):
+                st.latex(r"\phi' = \frac{(\sqrt{20 N} + 20) + (27.1 + 0.3N - 0.00054N^2)}{2}")
+                st.latex(r"\alpha_{bond} \text{ (Arena)} \approx \min(3.8 N_{SPT}, 250)")
+                st.latex(r"\alpha_{bond} \text{ (Arcilla)} \approx f(S_u) \text{ (FHWA Tabla 5-3)}")
 
         with c2:
-            st.subheader("1.2 Visualización")
+            st.subheader("1.2 Perfil Estratigráfico")
             if not df_geo.empty:
                 fig, axs = plt.subplots(1, 3, figsize=(10, 6), sharey=True)
                 z_max = df_geo['z_fin'].max() + 1
                 
-                # Arrays para Step Plot
+                # Preparar datos para "step plot" correcto
                 z_plt, n_plt, a_plt = [], [], []
                 for _, r in df_geo.iterrows():
                     z_plt.extend([r['z_ini'], r['z_fin']])
@@ -196,7 +273,7 @@ def app_principal():
                 for _, r in df_geo.iterrows():
                     rect = patches.Rectangle((0, r['z_ini']), 1, r['Espesor_m'], fc=cols.get(r['Tipo'], 'white'), ec='k')
                     axs[2].add_patch(rect)
-                    axs[2].text(0.5, (r['z_ini']+r['z_fin'])/2, r['Tipo'], ha='center', va='center', rotation=90)
+                    axs[2].text(0.5, (r['z_ini']+r['z_fin'])/2, r['Tipo'], ha='center', va='center', rotation=90, fontsize=8)
                 axs[2].set_xlim(0, 1); axs[2].axis('off'); axs[2].set_title("Perfil")
                 
                 plt.ylim(z_max, 0)
@@ -219,10 +296,12 @@ def app_principal():
             if st.session_state['df_geo'].empty:
                 st.error("⚠️ Defina estratigrafía en Pestaña 1")
             else:
-                # Datos del suelo como lista de dicts para velocidad
+                # --- PREPARACIÓN DE DATOS ---
                 ESTRATOS = []
                 for _, r in st.session_state['df_geo'].iterrows():
-                    ESTRATOS.append({"z_fin": r['z_fin'], "qs": r['Alpha_Design'], "f_exp": r['f_exp']})
+                    ESTRATOS.append({
+                        "z_fin": r['z_fin'], "qs": r['Alpha_Design'], "f_exp": r['f_exp']
+                    })
                 
                 # --- ALGORITMO ORIGINAL ---
                 DIAMETROS_COM = {0.100: 1.00, 0.115: 0.95, 0.150: 0.90, 0.200: 0.85} # D: Eficiencia
@@ -240,6 +319,7 @@ def app_principal():
                 
                 bar = st.progress(0)
                 
+                # --- BUCLE DE OPTIMIZACIÓN ---
                 for idx, D in enumerate(LISTA_D):
                     bar.progress((idx+1)/len(LISTA_D))
                     for N in range(MIN_MICROS, MAX_MICROS + 1):
@@ -247,17 +327,17 @@ def app_principal():
                         Q_req_geo = Q_act_pilote * FS_REQ
                         
                         for L in RANGO_L:
-                            # 1. Capacidad Geo
+                            # 1. Calc Capacidad Geo
                             Q_ult = 0; z_curr = 0
                             for e in ESTRATOS:
                                 if z_curr >= L: break
                                 z_bot = min(e["z_fin"], L)
-                                th = z_bot - z_curr
-                                if th > 0: Q_ult += (np.pi * D * th) * e["qs"]
+                                thick = z_bot - z_curr
+                                if thick > 0: Q_ult += (np.pi * D * thick) * e["qs"]
                                 z_curr = z_bot
                             
                             if Q_ult >= Q_req_geo:
-                                # Solución factible
+                                # Diseño viable encontrado para este N y D (L mínima)
                                 FS_calc = Q_ult / Q_act_pilote
                                 
                                 # 2. Volúmenes (Grout Expansion)
@@ -265,8 +345,8 @@ def app_principal():
                                 for e in ESTRATOS:
                                     if z_curr >= L: break
                                     z_bot = min(e["z_fin"], L)
-                                    th = z_bot - z_curr
-                                    if th > 0: v_exp_tot += (np.pi*(D/2)**2 * th) * e["f_exp"]
+                                    thick = z_bot - z_curr
+                                    if thick > 0: v_exp_tot += (np.pi*(D/2)**2 * thick) * e["f_exp"]
                                     z_curr = z_bot
                                 v_exp_tot *= N
                                 
@@ -275,12 +355,12 @@ def app_principal():
                                 area_acero = Q_act_pilote / FY_KPA
                                 peso_acero = area_acero * L * N * DEN_ACERO
                                 peso_cem = v_exp_tot * (1.0 / (WC_RATIO/1000.0 + 1.0/DEN_CEM))
-                                co2 = (peso_acero*F_CO2_ACERO + peso_cem*F_CO2_CEM + (L*N)*F_CO2_PERF)/1000
+                                co2 = (peso_acero*F_CO2_ACE + peso_cem*F_CO2_CEM + (L*N)*F_CO2_PERF)/1000
                                 
                                 resultados_raw.append({
                                     "D_mm": int(D*1000), "N": N, "L_m": L, "L_Tot_m": L*N,
                                     "FS": FS_calc, "Vol_Exp": v_exp_tot, "Costo_Idx": int(costo),
-                                    "CO2_ton": co2, "Q_act": Q_act_pilote/9.81
+                                    "CO2_ton": co2, "Q_adm_geo": Q_ult/FS_REQ/9.81, "Q_act": Q_act_pilote/9.81
                                 })
                                 break # L minima encontrada para este N y D
                 
@@ -340,7 +420,7 @@ def app_principal():
             M_u = st.number_input("Momento Mu (kNm)", value=15.0)
             
         with c_out:
-            if st.session_state['df_geo'].empty:
+            if not st.session_state.get('layers_objs'):
                 st.warning("⚠️ Sin datos de suelo.")
             else:
                 # --- CÁLCULOS DETALLADOS ---
@@ -442,8 +522,3 @@ if st.session_state['usuario_registrado']:
     app_principal()
 else:
     mostrar_registro()
-
-# Ejecutar
-if __name__ == "__main__":
-    AppInterface.run()
-
