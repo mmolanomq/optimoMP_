@@ -169,7 +169,6 @@ def draw_load_transfer(layers, results, fs_req):
             acc_depth += layer['thickness']
             
             if seg_len > 0:
-                # Ecuación Lineal: D_eff = D * f_exp
                 d_eff = D_m * layer['f_exp']
                 q_seg = (np.pi * d_eff * seg_len * layer['qs']) / fs_req
                 curr_q += q_seg
@@ -247,7 +246,6 @@ def run_optimization(load_ton, fs_req, wc_ratio, min_n, max_n, min_d, max_d, lay
                     start, end = max(0, top), min(L, bot)
                     seg = max(0, end - start)
                     if seg > 0:
-                        # ECUACIÓN CORREGIDA: D_eff = D * f_exp
                         d_eff = D_m * layer['f_exp']
                         q_ult += (np.pi * d_eff * seg) * layer['qs']
                         vol_exp += (area_perf * seg) * layer['f_exp']
@@ -306,22 +304,31 @@ def main():
             st.divider()
             st.markdown("**2. Definición de Estratos**")
             
-            # SOLUCIÓN DE COMPATIBILIDAD COLOR
-            try:
-                color_conf = st.column_config.ColorColumn("Color")
-            except AttributeError:
-                color_conf = st.column_config.TextColumn("Color")
-
-            layers_df = pd.DataFrame(st.session_state['layers'])
-            edited_layers = st.data_editor(
-                layers_df, num_rows="dynamic", hide_index=True,
-                column_config={
-                    "color": color_conf,
+            # --- CORRECCIÓN ROBUSTA PARA COLUMN CONFIG ---
+            # Construimos la configuración de columnas dinámicamente
+            # Si st.column_config no existe, usamos None para que st.data_editor use defaults
+            
+            cols_cfg = None
+            if hasattr(st, "column_config"):
+                cols_cfg = {
                     "name": "Nombre",
                     "thickness": st.column_config.NumberColumn("H (m)", min_value=0.1, format="%.1f"),
                     "qs": st.column_config.NumberColumn("Qs (kPa)", min_value=0),
                     "f_exp": st.column_config.NumberColumn("F.Exp", min_value=1.0, max_value=3.0, step=0.1)
                 }
+                # Intentamos añadir ColorColumn con fallback seguro
+                if hasattr(st.column_config, "ColorColumn"):
+                    cols_cfg["color"] = st.column_config.ColorColumn("Color")
+                else:
+                    cols_cfg["color"] = st.column_config.TextColumn("Color")
+
+            layers_df = pd.DataFrame(st.session_state['layers'])
+            edited_layers = st.data_editor(
+                layers_df, 
+                num_rows="dynamic", 
+                hide_index=True,
+                column_config=cols_cfg,
+                use_container_width=True
             )
             st.session_state['layers'] = edited_layers.to_dict('records')
 
@@ -369,10 +376,21 @@ def main():
                         st.subheader("Resultados")
                         df_show = df_res.copy()
                         df_show['Seleccionar'] = False
+                        
+                        # Configuración segura para tabla de resultados
+                        res_cols_cfg = None
+                        if hasattr(st, "column_config"):
+                             res_cols_cfg = {
+                                "Seleccionar": st.column_config.CheckboxColumn("Ver", default=False),
+                                "D_mm": st.column_config.NumberColumn("Ø (mm)", format="%d"),
+                                "L": st.column_config.NumberColumn("L (m)", format="%.1f"),
+                                "FS": st.column_config.NumberColumn("FS", format="%.2f")
+                             }
+
                         edited_res = st.data_editor(
                             df_show[["Seleccionar", "D_mm", "N", "L", "Perf_Total", "FS", "Q_adm", "Q_act", "Vol_Grout", "CO2"]].head(15),
                             hide_index=True, use_container_width=True,
-                            column_config={"Seleccionar": st.column_config.CheckboxColumn("Ver", default=False)}
+                            column_config=res_cols_cfg
                         )
                         sel_rows = edited_res[edited_res['Seleccionar']]
                         st.session_state['selected_indices'] = sel_rows.index.tolist() if not sel_rows.empty else list(df_res.head(3).index)
