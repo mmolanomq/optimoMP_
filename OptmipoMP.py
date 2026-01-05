@@ -3,522 +3,557 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from dataclasses import dataclass
-import requests
-import time
 from io import BytesIO
 
-# --- IMPORTACIONES PDF ---
-try:
-    from reportlab.lib.pagesizes import letter
-    from reportlab.pdfgen import canvas
-except ImportError:
-    pass
-
 # ==============================================================================
-# CONFIGURACIÓN GLOBAL
+# 0. CONFIGURACIÓN E INICIALIZACIÓN
 # ==============================================================================
-st.set_page_config(page_title="Micropile Pro Optimizer", layout="wide", page_icon="🏗️")
+st.set_page_config(
+    page_title="MicroPile Opt V3",
+    layout="wide",
+    page_icon="🏗️",
+    initial_sidebar_state="expanded"
+)
 
+# Estilos CSS para mejorar la UI y acercarse al diseño "Clean" de React
 st.markdown("""
 <style>
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px; white-space: pre-wrap; background-color: #f0f2f6;
-        border-radius: 5px 5px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] { background-color: #FFFFFF; border-bottom: 2px solid #0047AB; }
-    h1, h2, h3 { color: #2C3E50; }
+    .main .block-container { padding-top: 2rem; }
+    h1 { color: #1e3a8a; font-weight: 800; }
+    h2 { color: #1e40af; font-size: 1.5rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; }
+    h3 { color: #374151; font-size: 1.2rem; font-weight: 600; }
+    .stButton>button { width: 100%; border-radius: 6px; font-weight: bold; height: 3rem; }
+    .stButton>button[kind="primary"] { background-color: #2563eb; border: none; }
+    .stButton>button[kind="primary"]:hover { background-color: #1d4ed8; }
+    div[data-testid="stMetricValue"] { font-size: 1.6rem; color: #0f172a; }
+    div[data-testid="stMetricLabel"] { font-size: 0.9rem; color: #64748b; }
+    .info-box { background-color: #eff6ff; padding: 1rem; border-radius: 8px; border-left: 4px solid #3b82f6; margin-bottom: 1rem; }
+    .warning-box { background-color: #fefce8; padding: 1rem; border-radius: 8px; border-left: 4px solid #eab308; margin-bottom: 1rem; color: #854d0e; }
+    a { text-decoration: none; font-weight: bold; color: #2563eb; }
 </style>
 """, unsafe_allow_html=True)
 
-GOOGLE_SCRIPT_URL = ""  # Pega tu URL de Google Apps Script
+# --- CONSTANTES GLOBALES ---
+DIAMETROS_COM = {100: 1.00, 115: 0.95, 130: 0.93, 150: 0.90, 200: 0.85}
+LISTA_D = sorted(list(DIAMETROS_COM.keys()))
+COSTO_PERF_BASE = 100
+FACTOR_CO2_CEMENTO = 0.90
+FACTOR_CO2_PERF = 15.0
+FACTOR_CO2_ACERO = 1.85
+DENSIDAD_ACERO = 7850.0
+DENSIDAD_CEMENTO = 3150.0
+FY_ACERO_KPA = 500000.0
+
+# --- ESTADO DE SESIÓN ---
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+
+# Datos Iniciales por defecto
+if 'layers' not in st.session_state:
+    st.session_state['layers'] = [
+        {"name": "Relleno / Arcilla Blanda", "thickness": 3.0, "qs": 40.0, "f_exp": 1.1, "color": "#dbeafe"},
+        {"name": "Arcilla Firme / Limo", "thickness": 5.0, "qs": 80.0, "f_exp": 1.2, "color": "#fef3c7"},
+        {"name": "Estrato Resistente", "thickness": 10.0, "qs": 150.0, "f_exp": 1.3, "color": "#fee2e2"}
+    ]
+
+if 'global_results' not in st.session_state:
+    st.session_state['global_results'] = None
+
+if 'selected_indices' not in st.session_state:
+    st.session_state['selected_indices'] = []
 
 # ==============================================================================
-# 1. SISTEMA DE REGISTRO & ESTADO
+# 1. PANTALLA DE LOGIN
 # ==============================================================================
-if 'usuario_registrado' not in st.session_state: st.session_state['usuario_registrado'] = False
-if 'datos_usuario' not in st.session_state: st.session_state['datos_usuario'] = {}
-# Inicialización segura de variables globales
-if 'design_optimo' not in st.session_state: st.session_state['design_optimo'] = {}
-if 'layers_objs' not in st.session_state: st.session_state['layers_objs'] = []
-if 'df_geo' not in st.session_state: st.session_state['df_geo'] = pd.DataFrame()
-
-def enviar_a_google_sheets(datos):
-    if not GOOGLE_SCRIPT_URL: return True
-    try:
-        requests.post(GOOGLE_SCRIPT_URL, json=datos, timeout=3)
-        return True
-    except: return False
-
-def mostrar_registro():
+def login_screen():
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown("## 🔒 MicroPile Pro Optimizer")
-        st.info("Herramienta especializada en diseño y optimización de micropilotes.")
-        with st.form("reg"):
-            nombre = st.text_input("Nombre")
-            empresa = st.text_input("Empresa")
-            email = st.text_input("Email")
-            if st.form_submit_button("INGRESAR"):
-                if nombre and email:
-                    st.session_state['usuario_registrado'] = True
-                    st.session_state['datos_usuario'] = {'nombre': nombre, 'empresa': empresa}
-                    enviar_a_google_sheets({'nombre': nombre, 'email': email, 'fecha': time.strftime("%Y-%m-%d")})
-                    st.rerun()
-                else: st.error("Complete los datos requeridos.")
-
-# ==============================================================================
-# 2. MOTOR CIENTÍFICO (DYWIDAG & GEOTECNIA)
-# ==============================================================================
-
-def get_dywidag_db():
-    """Catálogo Dywidag (DSI) - Hollow Bars (Sin Titan)."""
-    data = {
-        "Sistema": ["R32-280", "R32-360", "R38-500", "R38-550", "R51-660", "R51-800", "T76-1200", "T76-1600"],
-        "D_ext_mm": [32, 32, 38, 38, 51, 51, 76, 76],
-        "As_mm2": [410, 510, 750, 800, 970, 1150, 1610, 1990],
-        "fy_MPa": [535, 550, 533, 560, 555, 556, 620, 600]
-    }
-    return pd.DataFrame(data)
-
-@dataclass
-class SoilLayerObj:
-    z_top: float; z_bot: float; tipo: str; alpha: float; kh: float
-    def contains(self, z): return self.z_top <= z <= self.z_bot
-
-def procesar_geotecnia(df_input):
-    """Calcula Alpha Bond, Phi y E basado en inputs."""
-    results = []
-    z_acum = 0
-    for _, row in df_input.iterrows():
-        try:
-            esp = float(row.get('Espesor_m', 0)); tipo = row.get('Tipo', 'Arcilla')
-            n_spt = float(row.get('N_SPT', 0)); su = float(row.get('Su_kPa', 0))
-            kh = float(row.get('Kh_kNm3', 0)); a_manual = float(row.get('Alpha_Manual', 0))
-        except: continue
-        
-        phi = 0; E_MPa = 0; alpha = 0
-        
-        # Correlaciones (Wolff, Kulhawy, FHWA)
-        if tipo == "Arena":
-            phi = ((np.sqrt(20*n_spt)+20) + (27.1+0.3*n_spt-0.00054*n_spt**2))/2
-            E_MPa = 1.0 * n_spt
-            alpha = min(3.8 * n_spt, 250)
-        elif tipo == "Arcilla":
-            E_MPa = 0.3 * su
-            if su < 25: alpha = 20
-            elif su < 50: alpha = 40
-            elif su < 100: alpha = 70
-            else: alpha = 100
-        else: # Roca
-            E_MPa = 5000; alpha = 300
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("<div style='text-align: center;'><h1>🔒 Acceso de Ingeniería</h1><p>Sistema de Optimización de Micropilotes</p></div>", unsafe_allow_html=True)
             
-        a_final = a_manual if a_manual > 0 else alpha
-        z_fin = z_acum + esp
-        
-        results.append({
-            "z_ini": z_acum, "z_fin": z_fin, "Espesor_m": esp, "Tipo": tipo,
-            "N_SPT": n_spt, "Su_kPa": su, "Kh_kNm3": kh, "Alpha_Design": a_final,
-            "Phi_Deg": phi, "E_MPa": E_MPa, "f_exp": 1.2 # Factor expansión default
-        })
-        z_acum = z_fin
-    return pd.DataFrame(results)
+            with st.form("login_form"):
+                nombre = st.text_input("Nombre Completo", placeholder="Ej. Juan Pérez")
+                email = st.text_input("Correo Electrónico", placeholder="nombre@empresa.com")
+                empresa = st.text_input("Empresa / Proyecto")
+                cargo = st.selectbox("Cargo", ["Ingeniero Geotecnista", "Ingeniero Estructural", "Constructor/Residente", "Estudiante"])
+                acepto = st.checkbox("Acepto los términos de uso técnico y registro.")
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+                submitted = st.form_submit_button("🚀 INGRESAR AL SISTEMA", type="primary")
+                
+                if submitted:
+                    if nombre and email and empresa and acepto:
+                        st.session_state['logged_in'] = True
+                        st.session_state['user_info'] = {'nombre': nombre, 'email': email, 'cargo': cargo}
+                        st.rerun()
+                    else:
+                        st.error("Por favor complete todos los campos y acepte los términos.")
 
-def calc_micropile_axial(L, D, layers, fs):
-    """Integra la capacidad por fuste (Bond)."""
-    perim = np.pi * D
-    z_arr = np.linspace(0, L, 100)
-    q_ult = []; curr = 0
+# ==============================================================================
+# 2. FUNCIONES DE CÁLCULO Y VISUALIZACIÓN (MATPLOTLIB)
+# ==============================================================================
+
+def draw_integrated_model(layers, spt_data, k_factor, water_table):
+    """Genera el gráfico triple: Estratigrafía, N-SPT y Qs"""
+    # Preparar datos
+    total_depth = sum(l['thickness'] for l in layers)
+    max_depth = max(total_depth, 15) * 1.1
     
-    for z in z_arr:
-        alpha = 0
-        if z > 0:
-            for l in layers:
-                if l.contains(z): alpha = l.alpha; break
-            if layers and z > layers[-1].z_bot: alpha = layers[-1].alpha
+    # Datos SPT y Qs
+    z_spt = [d['z'] for d in spt_data]
+    n_spt = [d['n'] for d in spt_data]
+    qs_est = [min(d['n'] * k_factor, 300) for d in spt_data]
+
+    # Crear figura con 3 subplots (Estratigrafía, N, Qs)
+    fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(10, 8), gridspec_kw={'width_ratios': [1, 1, 1]}, sharey=True)
+    plt.subplots_adjust(wspace=0.15)
+
+    # --- 1. ESTRATIGRAFÍA ---
+    current_depth = 0
+    for layer in layers:
+        rect = patches.Rectangle((0, current_depth), 1, layer['thickness'], 
+                               linewidth=0.5, edgecolor='gray', facecolor=layer['color'])
+        ax0.add_patch(rect)
+        
+        # Textos
+        mid_y = current_depth + layer['thickness']/2
+        ax0.text(0.5, mid_y, f"{layer['name']}\nH={layer['thickness']}m\nQs={int(layer['qs'])}", 
+                ha='center', va='center', fontsize=8, color='#1e293b', fontweight='bold', wrap=True)
+        
+        current_depth += layer['thickness']
+        ax0.axhline(y=current_depth, color='gray', linestyle=':', linewidth=0.5)
+        ax0.text(1.05, current_depth, f"{current_depth:.1f}m", va='center', fontsize=7)
+
+    # Nivel Freático
+    if water_table > 0:
+        ax0.axhline(y=water_table, color='blue', linestyle='--', linewidth=2)
+        ax0.text(0.9, water_table - 0.2, "N.F.", color='blue', fontsize=8, fontweight='bold', ha='right')
+        # Triángulo
+        triangle = patches.Polygon([[0.8, water_table], [0.9, water_table], [0.85, water_table+0.4]], closed=True, color='blue')
+        ax0.add_patch(triangle)
+
+    ax0.set_ylim(max_depth, 0)
+    ax0.set_xlim(0, 1)
+    ax0.set_xticks([])
+    ax0.set_title("Estratigrafía", fontsize=10, fontweight='bold', pad=10)
+    ax0.set_ylabel("Profundidad (m)")
+
+    # --- 2. N-SPT ---
+    ax1.plot(n_spt, z_spt, 'o-', color='#2563eb', linewidth=2, markersize=5)
+    ax1.set_xlabel("N (golpes/pie)")
+    ax1.grid(True, linestyle='--', alpha=0.5)
+    ax1.set_title("N-SPT", fontsize=10, fontweight='bold', pad=10, color='#1e40af')
+    ax1.set_xlim(0, 60)
+
+    # --- 3. Qs Estimado ---
+    ax2.plot(qs_est, z_spt, 's-', color='#dc2626', linewidth=2, markersize=5)
+    ax2.set_xlabel("Adherencia (kPa)")
+    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.set_title(f"Qs Est. (K={k_factor})", fontsize=10, fontweight='bold', pad=10, color='#991b1b')
+    ax2.set_xlim(0, 350)
+
+    return fig
+
+def draw_load_transfer(layers, results, fs_req):
+    """Dibuja las curvas de transferencia de carga para las alternativas seleccionadas"""
+    if results is None or results.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Colores para las curvas
+    colors = ['#2563eb', '#16a34a', '#dc2626', '#d97706', '#9333ea']
+    
+    max_depth = 0
+    max_q = 0
+
+    # Fondo de estratos
+    current_depth = 0
+    total_strat_depth = sum(l['thickness'] for l in layers)
+    for layer in layers:
+        ax.axhspan(current_depth, current_depth + layer['thickness'], color=layer['color'], alpha=0.3)
+        ax.text(0, current_depth + 0.5, f"Qs={int(layer['qs'])}", fontsize=7, color='gray', ha='left')
+        current_depth += layer['thickness']
+
+    # Dibujar curvas
+    for i, (_, row) in enumerate(results.iterrows()):
+        L = row['L']
+        D_mm = row['D_mm']
+        N = int(row['N'])
+        D_m = D_mm / 1000.0
+        
+        # Generar puntos de la curva
+        z_points = [0]
+        q_points = [0]
+        curr_z = 0
+        curr_q = 0
+        acc_depth = 0
+
+        for layer in layers:
+            if curr_z >= L: break
             
-        curr += alpha * perim * (L/100) # Integration step
-        q_ult.append(curr)
+            layer_top = acc_depth
+            layer_bot = acc_depth + layer['thickness']
+            acc_depth += layer['thickness']
+            
+            # Segmento dentro de la capa
+            start = max(0, layer_top)
+            end = min(L, layer_bot)
+            seg_len = max(0, end - start)
+            
+            if seg_len > 0:
+                # Ecuación Lineal: D_eff = D * f_exp
+                d_eff = D_m * layer['f_exp']
+                q_seg = (np.pi * d_eff * seg_len * layer['qs']) / fs_req # Capacidad admisible acumulada
+                
+                curr_q += q_seg
+                curr_z += seg_len
+                z_points.append(curr_z)
+                q_points.append(curr_q)
         
-    return z_arr, np.array(q_ult), np.array(q_ult)/fs
+        ax.plot(q_points, z_points, marker='o', markersize=3, label=f"{N}xØ{int(D_mm)} (L={L}m)", color=colors[i % len(colors)], linewidth=2)
+        
+        max_depth = max(max_depth, L)
+        max_q = max(max_q, curr_q)
 
-def calc_winkler(L, D, EI, V, M, layers):
-    """Modelo de Viga sobre Fundación Elástica (Winkler)."""
-    if not layers: return np.array([]), np.array([]), np.array([]), np.array([]), 0
+    ax.set_ylim(max(max_depth + 2, total_strat_depth), 0)
+    ax.set_xlim(0, max_q * 1.1)
+    ax.set_xlabel("Capacidad Admisible Acumulada (Ton)")
+    ax.set_ylabel("Profundidad (m)")
+    ax.legend(loc='lower right', fontsize=8)
+    ax.grid(True, linestyle=':', alpha=0.7)
+    ax.set_title("Curvas de Transferencia de Carga (Q_adm)", fontsize=10, fontweight='bold')
+
+    return fig
+
+def draw_pile_cap(config, rank):
+    """Dibuja el esquema del dado/cabezal"""
+    N = int(config['N'])
+    D = config['D_mm'] / 1000.0
     
-    # Kh simplificado (promedio superior)
-    kh = layers[0].kh if layers[0].kh > 0 else 5000
+    # Reglas de diseño simplificadas
+    S = max(0.75, 3 * D)
+    Edge = max(0.30, 1.5 * D)
     
-    beta = ((kh * D) / (4 * EI))**0.25
-    z = np.linspace(0, L, 200)
-    y, m_res, v_res = [], [], []
+    # Distribución en Grid
+    if N == 1: cols, rows = 1, 1
+    elif N == 2: cols, rows = 2, 1
+    elif N == 3: cols, rows = 3, 1
+    elif N == 4: cols, rows = 2, 2
+    elif N <= 6: cols, rows = 3, 2
+    elif N <= 9: cols, rows = 3, 3
+    else: cols = int(np.ceil(np.sqrt(N))); rows = int(np.ceil(N/cols))
     
-    for x in z:
-        bz = beta * x
-        if bz > 15: 
-            y.append(0); m_res.append(0); v_res.append(0); continue
+    W = (cols - 1) * S + 2 * Edge
+    L = (rows - 1) * S + 2 * Edge
+    H = 0.50 + (0.1 * (rows-1))
+    Vol = W * L * H
+    
+    fig, ax = plt.subplots(figsize=(3, 3))
+    
+    # Dado (Rectángulo)
+    rect = patches.Rectangle((0, 0), W, L, facecolor='#e2e8f0', edgecolor='#475569', linewidth=2)
+    ax.add_patch(rect)
+    
+    # Pilotes (Círculos)
+    for i in range(N):
+        r_idx = i // cols
+        c_idx = i % cols
+        cx = Edge + c_idx * S
+        cy = Edge + r_idx * S
         
-        exp = np.exp(-bz); sin = np.sin(bz); cos = np.cos(bz)
-        A = exp*(cos+sin); B = exp*sin; C = exp*(cos-sin); D_fact = exp*cos
-        
-        y_val = (2*V*beta/(kh*D))*D_fact + (2*M*beta**2/(kh*D))*C
-        m_val = (V/beta)*B + M*A
-        v_val = V*C - 2*M*beta*D_fact
-        
-        y.append(y_val); m_res.append(m_val); v_res.append(v_val)
-        
-    return z, np.array(y), np.array(m_res), np.array(v_res), beta
+        circle = patches.Circle((cx, cy), D/2, facecolor='#1e293b', edgecolor='black')
+        ax.add_patch(circle)
+    
+    # Cotas
+    ax.text(W/2, -0.2, f"{W:.2f}m", ha='center', fontsize=9, color='#64748b')
+    ax.text(-0.2, L/2, f"{L:.2f}m", va='center', rotation=90, fontsize=9, color='#64748b')
+
+    ax.set_xlim(-0.5, W + 0.5)
+    ax.set_ylim(-0.5, L + 0.5)
+    ax.axis('off')
+    ax.set_aspect('equal')
+    
+    return fig, Vol, W, L, H, S
 
 # ==============================================================================
-# 3. INTERFAZ PRINCIPAL
+# 3. LÓGICA DE OPTIMIZACIÓN
 # ==============================================================================
-def app_principal():
-    # --- SIDEBAR ---
+def run_optimization(load_ton, fs_req, wc_ratio, min_n, max_n, min_d, max_d, layers):
+    carga_req_kn = load_ton * 9.81
+    solutions = []
+    
+    valid_diameters = [d for d in LISTA_D if min_d <= d <= max_d]
+    
+    for D_mm in valid_diameters:
+        D_m = D_mm / 1000.0
+        eficiencia = DIAMETROS_COM.get(D_mm, 0.85)
+        
+        for N in range(min_n, max_n + 1):
+            q_act_pilote = carga_req_kn / N
+            q_req_geo = q_act_pilote * fs_req
+            
+            # Buscar Longitud
+            for L in np.arange(5.0, 40.5, 0.5):
+                q_ult = 0
+                vol_exp = 0
+                acc_depth = 0
+                area_perf = np.pi * (D_m/2)**2
+                
+                for layer in layers:
+                    top = acc_depth
+                    bot = acc_depth + layer['thickness']
+                    acc_depth += layer['thickness']
+                    
+                    start = max(0, top)
+                    end = min(L, bot)
+                    seg = max(0, end - start)
+                    
+                    if seg > 0:
+                        # ECUACIÓN CORREGIDA: D_eff = D * f_exp
+                        d_eff = D_m * layer['f_exp']
+                        q_ult += (np.pi * d_eff * seg) * layer['qs']
+                        vol_exp += (area_perf * seg) * layer['f_exp']
+                
+                if L > acc_depth:
+                    extra = L - acc_depth
+                    last = layers[-1]
+                    d_eff = D_m * last['f_exp']
+                    q_ult += (np.pi * d_eff * extra) * last['qs']
+                    vol_exp += (area_perf * extra) * last['f_exp']
+                
+                if q_ult >= q_req_geo:
+                    # Cálculos finales
+                    vol_total_grout = vol_exp * N
+                    costo_idx = (L * N * COSTO_PERF_BASE) / eficiencia
+                    
+                    # CO2
+                    area_acero = q_act_pilote / FY_ACERO_KPA
+                    vol_acero = area_acero * L * N
+                    peso_acero = vol_acero * DENSIDAD_ACERO
+                    
+                    vol_grout_neto = max(0, vol_total_grout - vol_acero)
+                    peso_cemento = vol_grout_neto * (1000 / (wc_ratio + 1/3.15))
+                    
+                    co2 = (peso_acero * FACTOR_CO2_ACERO + peso_cemento * FACTOR_CO2_CEMENTO + (L*N) * FACTOR_CO2_PERF) / 1000
+                    
+                    solutions.append({
+                        "D_mm": D_mm,
+                        "N": N,
+                        "L": L,
+                        "Perf_Total": L*N,
+                        "FS": q_ult / q_act_pilote,
+                        "Q_adm": q_ult / fs_req / 9.81,
+                        "Q_act": q_act_pilote / 9.81,
+                        "Vol_Grout": vol_total_grout,
+                        "CO2": co2,
+                        "Costo_Idx": costo_idx
+                    })
+                    break # Salir de L loop
+    
+    if not solutions:
+        return pd.DataFrame()
+    
+    return pd.DataFrame(solutions).sort_values("Costo_Idx")
+
+# ==============================================================================
+# 4. APP PRINCIPAL
+# ==============================================================================
+
+def main():
+    if not st.session_state['logged_in']:
+        login_screen()
+        return
+
+    # Sidebar Global
     with st.sidebar:
-        st.success(f"Ingeniero: **{st.session_state['datos_usuario'].get('nombre')}**")
-        
-        if st.button("📄 Generar Reporte PDF"):
-            try:
-                buffer = BytesIO()
-                p = canvas.Canvas(buffer, pagesize=letter)
-                p.drawString(100, 750, "REPORTE DE DISEÑO - MICROPILE PRO")
-                p.drawString(100, 730, f"Usuario: {st.session_state['datos_usuario'].get('nombre')}")
-                p.drawString(100, 710, f"Empresa: {st.session_state['datos_usuario'].get('empresa')}")
-                
-                opt = st.session_state.get('design_optimo')
-                if opt:
-                    p.drawString(100, 680, "RESUMEN OPTIMIZACIÓN:")
-                    p.drawString(100, 660, f"- Configuración: {opt.get('N')} micropilotes x D={opt.get('D_mm')}mm")
-                    p.drawString(100, 640, f"- Longitud: {opt.get('L_m')} m")
-                    p.drawString(100, 620, f"- Huella CO2: {opt.get('CO2_ton'):.2f} Ton")
-                else:
-                    p.drawString(100, 680, "Nota: No se ha ejecutado la optimización.")
-                
-                p.showPage()
-                p.save()
-                st.download_button("Descargar Reporte", buffer, "Reporte_Micropilotes.pdf", "application/pdf")
-            except Exception as e:
-                st.error("Error al generar PDF. Verifique reportlab.")
-
+        st.info(f"👤 **{st.session_state['user_info']['nombre']}**\n\n{st.session_state['user_info']['cargo']}")
         if st.button("Cerrar Sesión"):
-            st.session_state['usuario_registrado'] = False; st.rerun()
+            st.session_state['logged_in'] = False
+            st.rerun()
 
-    st.title("🏗️ MicroPile Pro Optimizer")
-    
-    tab1, tab2, tab3 = st.tabs([
-        "🌍 1. Información Geotécnica", 
-        "🚀 2. Optimizador de Diseño", 
-        "📐 3. Diseño Detallado & Planos"
-    ])
+    st.title("🏗️ Optimizador de Micropilotes")
 
-    # --------------------------------------------------------------------------
-    # TAB 1: GEOTECNIA (ENTRADA Y VISUALIZACIÓN)
-    # --------------------------------------------------------------------------
-    with tab1:
-        c1, c2 = st.columns([1.3, 1])
+    tab_geo, tab_design, tab_caps = st.tabs(["1. Info Geotécnica", "2. Diseño & Cálculo", "3. Dados / Cabezales"])
+
+    # --- TAB 1: GEOTECNIA ---
+    with tab_geo:
+        c1, c2 = st.columns([1, 2])
+        
         with c1:
-            st.subheader("1.1 Estratigrafía y Parámetros")
-            st.info("Ingrese el perfil del suelo. El 'Alpha Bond' se calcula automáticamente a menos que ingrese un valor manual.")
+            st.markdown("### 📥 Datos de Entrada")
             
-            df_template = pd.DataFrame([
-                {"Espesor_m": 4.0, "Tipo": "Arcilla", "N_SPT": 5, "Su_kPa": 40, "Kh_kNm3": 8000, "Alpha_Manual": 0.0},
-                {"Espesor_m": 8.0, "Tipo": "Arena", "N_SPT": 25, "Su_kPa": 0, "Kh_kNm3": 25000, "Alpha_Manual": 0.0},
-                {"Espesor_m": 6.0, "Tipo": "Roca", "N_SPT": 50, "Su_kPa": 0, "Kh_kNm3": 90000, "Alpha_Manual": 400.0},
-            ])
+            # Editor SPT
+            st.markdown("**1. Registro SPT**")
+            if 'spt_df' not in st.session_state:
+                st.session_state['spt_df'] = pd.DataFrame([
+                    {"z": 1.5, "n": 4}, {"z": 3.0, "n": 7}, {"z": 4.5, "n": 12},
+                    {"z": 6.0, "n": 15}, {"z": 7.5, "n": 22}, {"z": 9.0, "n": 28},
+                    {"z": 10.5, "n": 35}, {"z": 12.0, "n": 42}, {"z": 15.0, "n": 50}
+                ])
+            edited_spt = st.data_editor(st.session_state['spt_df'], num_rows="dynamic", hide_index=True)
+            st.session_state['spt_df'] = edited_spt
             
-            edited_df = st.data_editor(
-                df_template, 
-                column_config={"Tipo": st.column_config.SelectboxColumn(options=["Arcilla", "Arena", "Roca", "Relleno"])},
-                num_rows="dynamic", use_container_width=True
+            k_val = st.slider("Factor K (Correlación)", 1.0, 10.0, 3.5, 0.5)
+            nf_val = st.number_input("Nivel Freático (m)", 0.0, 50.0, 2.0, 0.5)
+            
+            st.divider()
+            
+            # Editor Capas
+            st.markdown("**2. Definición de Estratos**")
+            layers_df = pd.DataFrame(st.session_state['layers'])
+            edited_layers = st.data_editor(
+                layers_df, 
+                num_rows="dynamic", 
+                hide_index=True,
+                column_config={
+                    "color": st.column_config.ColorColumn("Color"),
+                    "name": "Nombre",
+                    "thickness": st.column_config.NumberColumn("H (m)", min_value=0.1, format="%.1f"),
+                    "qs": st.column_config.NumberColumn("Qs (kPa)", min_value=0),
+                    "f_exp": st.column_config.NumberColumn("F.Exp", min_value=1.0, max_value=3.0, step=0.1)
+                }
             )
-            
-            df_geo = procesar_geotecnia(edited_df)
-            
-            # Guardar en sesión
-            st.session_state['df_geo'] = df_geo
-            layers_objs = []
-            for _, r in df_geo.iterrows():
-                layers_objs.append(SoilLayerObj(r['z_ini'], r['z_fin'], r['Tipo'], r['Alpha_Design'], r['Kh_kNm3']))
-            st.session_state['layers_objs'] = layers_objs
-            
-            st.markdown("#### Parámetros de Diseño Calculados")
-            fmt = {c: "{:.1f}" for c in ["z_ini", "z_fin", "Alpha_Design", "Phi_Deg", "E_MPa"]}
-            st.dataframe(df_geo.style.format(fmt), use_container_width=True)
-            
-            with st.expander("Ver Ecuaciones de Correlación Utilizadas"):
-                st.latex(r"\phi' = \frac{(\sqrt{20 N} + 20) + (27.1 + 0.3N - 0.00054N^2)}{2}")
-                st.latex(r"\alpha_{bond} \text{ (Arena)} \approx \min(3.8 N_{SPT}, 250)")
-                st.latex(r"\alpha_{bond} \text{ (Arcilla)} \approx f(S_u) \text{ (FHWA Tabla 5-3)}")
+            st.session_state['layers'] = edited_layers.to_dict('records')
 
         with c2:
-            st.subheader("1.2 Perfil Estratigráfico")
-            if not df_geo.empty:
-                fig, axs = plt.subplots(1, 3, figsize=(10, 6), sharey=True)
-                z_max = df_geo['z_fin'].max() + 1
+            st.markdown("### 📊 Modelo Geotécnico Integrado")
+            
+            fig = draw_integrated_model(st.session_state['layers'], st.session_state['spt_df'].to_dict('records'), k_val, nf_val)
+            st.pyplot(fig)
+            
+            # Botones descarga
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
+            st.download_button("📸 Descargar Gráfico (PNG)", buf.getvalue(), "modelo_geotecnico.png", "image/png")
+            
+            with st.expander("📚 Referencias Técnicas (Tablas)"):
+                st.markdown("""
+                * **[FHWA (NHI-05-039)](https://rosap.ntl.bts.gov/view/dot/50231)** - Micropile Design and Construction Reference Manual.
+                * **[Bustamante y Doix (1985)](https://www.google.com/search?q=Bustamante+and+Doix+1985+micropiles)** - Método para micropilotes inyectados.
                 
-                # Preparar datos para "step plot" correcto
-                z_plt, n_plt, a_plt = [], [], []
-                for _, r in df_geo.iterrows():
-                    z_plt.extend([r['z_ini'], r['z_fin']])
-                    n_plt.extend([r['N_SPT'], r['N_SPT']])
-                    a_plt.extend([r['Alpha_Design'], r['Alpha_Design']])
-                
-                # Plot N-SPT
-                axs[0].plot(n_plt, z_plt, 'b'); axs[0].set_title("N-SPT"); axs[0].invert_yaxis(); axs[0].grid(True, ls=':')
-                # Plot Alpha
-                axs[1].plot(a_plt, z_plt, 'r'); axs[1].set_title("Alpha (kPa)"); axs[1].grid(True, ls=':')
-                # Plot Perfil Visual
-                cols = {"Arcilla": "#D7BDE2", "Arena": "#F9E79F", "Roca": "#AED6F1", "Relleno": "#D3D3D3"}
-                for _, r in df_geo.iterrows():
-                    rect = patches.Rectangle((0, r['z_ini']), 1, r['Espesor_m'], fc=cols.get(r['Tipo'], 'white'), ec='k')
-                    axs[2].add_patch(rect)
-                    axs[2].text(0.5, (r['z_ini']+r['z_fin'])/2, r['Tipo'], ha='center', va='center', rotation=90, fontsize=8)
-                axs[2].set_xlim(0, 1); axs[2].axis('off'); axs[2].set_title("Perfil")
-                
-                plt.ylim(z_max, 0)
-                st.pyplot(fig)
+                | Tipo de Suelo (Gravedad Tipo A) | Qs Típico (kPa) |
+                | :--- | :--- |
+                | Arcilla Blanda / Limo | 20 - 60 |
+                | Arcilla Media | 40 - 90 |
+                | Arena Media/Densa | 100 - 250 |
+                | Roca / Grava | 200 - 500+ |
+                """)
 
-    # --------------------------------------------------------------------------
-    # TAB 2: OPTIMIZACIÓN (TU ALGORITMO ORIGINAL)
-    # --------------------------------------------------------------------------
-    with tab2:
-        st.subheader("🚀 Optimizador Multi-Variable")
+    # --- TAB 2: DISEÑO ---
+    with tab_design:
+        # Header Formula
+        st.markdown(r"""
+        <div class="info-box" style="text-align: center;">
+            <strong>Ecuación de Diseño:</strong> $Q_{ult} = \pi \cdot \sum ( D_{nom} \cdot f_{exp,i} \cdot L_i \cdot q_{s,i} )$ &nbsp;&nbsp;|&nbsp;&nbsp; $FS = Q_{ult} / Q_{act} \ge FS_{req}$
+        </div>
+        """, unsafe_allow_html=True)
         
-        c_opt1, c_opt2 = st.columns(2)
-        with c_opt1:
-            CARGA_TON = st.number_input("Carga Total Grupo (Ton)", 50.0, 5000.0, 200.0)
-            FS_REQ = st.number_input("FS Geotécnico Objetivo", 1.5, 3.0, 2.0)
-        with c_opt2:
-            WC_RATIO = st.slider("Relación A/C Lechada", 0.4, 0.6, 0.5)
+        c_conf, c_res = st.columns([1, 3])
         
-        if st.button("EJECUTAR OPTIMIZACIÓN"):
-            if st.session_state['df_geo'].empty:
-                st.error("⚠️ Defina estratigrafía en Pestaña 1")
-            else:
-                # --- PREPARACIÓN DE DATOS ---
-                ESTRATOS = []
-                for _, r in st.session_state['df_geo'].iterrows():
-                    ESTRATOS.append({
-                        "z_fin": r['z_fin'], "qs": r['Alpha_Design'], "f_exp": r['f_exp']
-                    })
-                
-                # --- ALGORITMO ORIGINAL ---
-                DIAMETROS_COM = {0.100: 1.00, 0.115: 0.95, 0.150: 0.90, 0.200: 0.85} # D: Eficiencia
-                LISTA_D = sorted(list(DIAMETROS_COM.keys()))
-                MIN_MICROS = 3; MAX_MICROS = 15
-                RANGO_L = range(6, 36) # 6 a 35m
-                COSTO_PERF_BASE = 100
-                
-                # Factores Ambientales
-                F_CO2_CEM = 0.90; F_CO2_PERF = 15.0; F_CO2_ACERO = 1.85
-                DEN_ACERO = 7850.0; DEN_CEM = 3150.0; FY_KPA = 500000.0
-                
-                CARGA_KN = CARGA_TON * 9.81
-                resultados_raw = []
-                
-                bar = st.progress(0)
-                
-                # --- BUCLE DE OPTIMIZACIÓN ---
-                for idx, D in enumerate(LISTA_D):
-                    bar.progress((idx+1)/len(LISTA_D))
-                    for N in range(MIN_MICROS, MAX_MICROS + 1):
-                        Q_act_pilote = CARGA_KN / N
-                        Q_req_geo = Q_act_pilote * FS_REQ
+        with c_conf:
+            st.subheader("Parámetros")
+            load = st.number_input("Carga Cabezal (Ton)", value=120.0)
+            fs = st.number_input("FS Requerido", value=2.0)
+            wc = st.number_input("Rel. A/C", value=0.5)
+            
+            st.subheader("Restricciones")
+            col_d1, col_d2 = st.columns(2)
+            d_min = col_d1.selectbox("Min Ø", LISTA_D, index=0)
+            d_max = col_d2.selectbox("Max Ø", LISTA_D, index=len(LISTA_D)-1)
+            
+            col_n1, col_n2 = st.columns(2)
+            n_min = col_n1.number_input("Min N", 1, 20, 1)
+            n_max = col_n2.number_input("Max N", 1, 20, 10)
+            
+            st.markdown("---")
+            run_calc = st.button("🚀 CALCULAR", type="primary")
+            
+        with c_res:
+            if run_calc:
+                with st.spinner("Procesando optimización..."):
+                    df_res = run_optimization(load, fs, wc, n_min, n_max, d_min, d_max, st.session_state['layers'])
+                    
+                    if df_res.empty:
+                        st.error("No se encontraron soluciones viables. Intente aumentar el rango de búsqueda o mejorar el suelo.")
+                    else:
+                        st.session_state['global_results'] = df_res
                         
-                        for L in RANGO_L:
-                            # 1. Calc Capacidad Geo
-                            Q_ult = 0; z_curr = 0
-                            for e in ESTRATOS:
-                                if z_curr >= L: break
-                                z_bot = min(e["z_fin"], L)
-                                thick = z_bot - z_curr
-                                if thick > 0: Q_ult += (np.pi * D * thick) * e["qs"]
-                                z_curr = z_bot
-                            
-                            if Q_ult >= Q_req_geo:
-                                # Diseño viable encontrado para este N y D (L mínima)
-                                FS_calc = Q_ult / Q_act_pilote
-                                
-                                # 2. Volúmenes (Grout Expansion)
-                                v_exp_tot = 0; z_curr = 0
-                                for e in ESTRATOS:
-                                    if z_curr >= L: break
-                                    z_bot = min(e["z_fin"], L)
-                                    thick = z_bot - z_curr
-                                    if thick > 0: v_exp_tot += (np.pi*(D/2)**2 * thick) * e["f_exp"]
-                                    z_curr = z_bot
-                                v_exp_tot *= N
-                                
-                                # 3. Metricas
-                                costo = (L * N * COSTO_PERF_BASE) / DIAMETROS_COM[D]
-                                area_acero = Q_act_pilote / FY_KPA
-                                peso_acero = area_acero * L * N * DEN_ACERO
-                                peso_cem = v_exp_tot * (1.0 / (WC_RATIO/1000.0 + 1.0/DEN_CEM))
-                                co2 = (peso_acero*F_CO2_ACE + peso_cem*F_CO2_CEM + (L*N)*F_CO2_PERF)/1000
-                                
-                                resultados_raw.append({
-                                    "D_mm": int(D*1000), "N": N, "L_m": L, "L_Tot_m": L*N,
-                                    "FS": FS_calc, "Vol_Exp": v_exp_tot, "Costo_Idx": int(costo),
-                                    "CO2_ton": co2, "Q_adm_geo": Q_ult/FS_REQ/9.81, "Q_act": Q_act_pilote/9.81
-                                })
-                                break # L minima encontrada para este N y D
-                
-                bar.empty()
-                
-                if resultados_raw:
-                    df_res = pd.DataFrame(resultados_raw).sort_values("Costo_Idx")
-                    best = df_res.iloc[0]
-                    st.session_state['opt_result'] = best.to_dict() # Guardar para Tab 3
-                    
-                    st.success("✅ Optimización Exitosa")
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("Configuración", f"{int(best['N'])} x Ø{int(best['D_mm'])}mm")
-                    k2.metric("Longitud", f"{int(best['L_m'])} m")
-                    k3.metric("Huella CO2", f"{best['CO2_ton']:.1f} Ton")
-                    
-                    st.dataframe(df_res.head(10).style.background_gradient(subset=['Costo_Idx'], cmap='Greens_r'), use_container_width=True)
-                    
-                    # Grafica Dispersion
-                    fig_sc, ax_sc = plt.subplots(figsize=(8, 4))
-                    sc = ax_sc.scatter(df_res['Costo_Idx'], df_res['CO2_ton'], c=df_res['L_m'], cmap='viridis', alpha=0.7)
-                    plt.colorbar(sc, label='Longitud (m)')
-                    ax_sc.set_xlabel("Índice Costo"); ax_sc.set_ylabel("Huella CO2 (Ton)")
-                    ax_sc.grid(True, ls=':')
-                    st.pyplot(fig_sc)
-                else:
-                    st.error("No se encontraron soluciones factibles.")
+                        # Top Result
+                        best = df_res.iloc[0]
+                        k1, k2, k3, k4 = st.columns(4)
+                        k1.metric("Mejor Config", f"{int(best['N'])} x Ø{int(best['D_mm'])}")
+                        k2.metric("Longitud", f"{best['L']} m", f"Total: {best['Perf_Total']:.0f}m")
+                        k3.metric("Grout", f"{best['Vol_Grout']:.1f} m³")
+                        k4.metric("Huella CO2", f"{best['CO2']:.1f} Ton")
+                        
+                        # Graph
+                        st.subheader("Curvas de Transferencia de Carga")
+                        # Por defecto mostramos top 5, luego se actualizará con la tabla
+                        top_5 = df_res.head(5)
+                        fig_trans = draw_load_transfer(st.session_state['layers'], top_5, fs)
+                        st.pyplot(fig_trans)
+                        
+                        # Tabla
+                        st.subheader("Tabla de Resultados")
+                        
+                        # Preparar DF para mostrar
+                        df_show = df_res.copy()
+                        df_show['Seleccionar'] = False
+                        
+                        # Configurar columnas
+                        column_cfg = {
+                            "Seleccionar": st.column_config.CheckboxColumn("Ver", help="Ver en Gráfica y Dados"),
+                            "D_mm": st.column_config.NumberColumn("Ø (mm)", format="%d"),
+                            "N": st.column_config.NumberColumn("Cant", format="%d"),
+                            "L": st.column_config.NumberColumn("L (m)", format="%.1f"),
+                            "Perf_Total": st.column_config.NumberColumn("Perf (m)", format="%.1f"),
+                            "FS": st.column_config.NumberColumn("FS", format="%.2f"),
+                            "Q_adm": st.column_config.NumberColumn("Qadm (T)", format="%.1f"),
+                            "CO2": st.column_config.ProgressColumn("CO2 (T)", format="%.1f", min_value=0, max_value=max(df_show['CO2']))
+                        }
+                        
+                        edited_res = st.data_editor(
+                            df_show[["Seleccionar", "D_mm", "N", "L", "Perf_Total", "FS", "Q_adm", "Q_act", "Vol_Grout", "CO2"]].head(15),
+                            column_config=column_cfg,
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                        
+                        # Actualizar selección en estado
+                        sel_rows = edited_res[edited_res['Seleccionar']]
+                        st.session_state['selected_indices'] = sel_rows.index.tolist() if not sel_rows.empty else list(df_res.head(3).index)
 
-    # --------------------------------------------------------------------------
-    # TAB 3: DISEÑO DETALLADO
-    # --------------------------------------------------------------------------
+                        # CSV Export (Excel Español)
+                        csv_data = df_res.to_csv(sep=';', decimal=',', index=False).encode('utf-8-sig')
+                        st.download_button("📥 Descargar Tabla (CSV Excel)", csv_data, "resultados_optimizacion.csv", "text/csv")
+
+    # --- TAB 3: DADOS ---
     with tab3:
-        st.subheader("📐 Diseño Detallado & Verificaciones")
-        
-        # Cargar valores optimos o defaults
-        opt = st.session_state.get('opt_result', {})
-        def_L = float(opt.get('L_m', 12.0)); def_D = float(opt.get('D_mm', 200.0))/1000
-        
-        c_in, c_out = st.columns([1, 1.5])
-        with c_in:
-            st.markdown("##### Geometría")
-            L = st.number_input("Longitud (m)", 1.0, 50.0, def_L)
-            D = st.number_input("Diámetro (m)", 0.1, 0.6, def_D)
+        if st.session_state['global_results'] is None:
+            st.info("⚠️ Ejecute el cálculo en la pestaña 'Diseño' primero.")
+        else:
+            df = st.session_state['global_results']
+            indices = st.session_state['selected_indices']
             
-            st.markdown("##### Refuerzo")
-            db = get_dywidag_db()
-            sys = st.selectbox("Barra Dywidag", db['Sistema'], index=2)
-            row_s = db[db['Sistema'] == sys].iloc[0]
-            st.caption(f"As: {row_s['As_mm2']} mm2 | Fy: {row_s['fy_MPa']} MPa")
-            fc = st.number_input("f'c Grout (MPa)", 20.0, 60.0, 30.0)
+            st.subheader(f"Diseño Geométrico de Cabezales ({len(indices)} seleccionados)")
             
-            st.markdown("##### Cargas Individuales")
-            # Carga por pilote sugerida del optimizador o default
-            def_P = float(opt.get('Q_act', 50.0) * 9.81) if opt else 500.0
-            P_u = st.number_input("Compresión Pu (kN)", value=def_P)
-            V_u = st.number_input("Cortante Vu (kN)", value=30.0)
-            M_u = st.number_input("Momento Mu (kNm)", value=15.0)
-            
-        with c_out:
-            if not st.session_state.get('layers_objs'):
-                st.warning("⚠️ Sin datos de suelo.")
-            else:
-                # --- CÁLCULOS DETALLADOS ---
-                layers_list = st.session_state['df_geo'].to_dict('records')
-                
-                # 1. Axial (Integración visual)
-                z_ax = np.linspace(0, L, 100)
-                q_ult = []; curr = 0; perim = np.pi * D
-                for z in z_ax:
-                    alpha = 0
-                    if z > 0:
-                        for l in layers_list:
-                            if l['z_ini'] <= z <= l['z_fin']: alpha = l['Alpha_Design']; break
-                        if z > layers_list[-1]['z_fin']: alpha = layers_list[-1]['Alpha_Design']
-                    curr += alpha * perim * (L/100)
-                    q_ult.append(curr)
-                q_adm = np.array(q_ult) / 2.0 # FS Visual
-                
-                # 2. Estructural
-                As = row_s['As_mm2']; fy = row_s['fy_MPa']
-                Ag = (np.pi*(D*1000/2)**2) - As
-                P_est = (0.40*fc*Ag + 0.47*fy*As)/1000
-                
-                # 3. Lateral
-                I_bar = (np.pi*(row_s['D_ext_mm']/1000)**4)/64
-                EI = 200e6 * I_bar + (4700*np.sqrt(fc)*1000 * ((np.pi*D**4)/64 - I_bar))
-                z_lat, y_lat, m_lat, v_lat, beta = calc_winkler(L, D, EI, V_u, M_u, layers_list)
-                
-                # --- RESULTADOS ---
-                k1, k2, k3 = st.columns(3)
-                q_geo_val = q_adm[-1]
-                k1.metric("Q Admisible Geo", f"{q_geo_val:.1f} kN", delta="OK" if q_geo_val>P_u else "FALLA")
-                k2.metric("P Estructural", f"{P_est:.1f} kN")
-                k3.metric("Deflexión Máx", f"{max(abs(y_lat))*1000:.1f} mm")
-                
-                # --- GRÁFICAS ---
-                fig_res, (ax_geo, ax_def, ax_mom) = plt.subplots(1, 3, figsize=(12, 6), sharey=True)
-                
-                # Axial + Suelo
-                max_q = max(q_ult)*1.2
-                cols = {"Arcilla": "#D7BDE2", "Arena": "#F9E79F", "Roca": "#AED6F1", "Relleno": "#D3D3D3"}
-                for l in layers_list:
-                    rect = patches.Rectangle((0, l['z_ini']), max_q, l['z_fin']-l['z_ini'], fc=cols.get(l['Tipo'], 'white'), alpha=0.3)
-                    ax_geo.add_patch(rect)
-                    ax_geo.text(max_q*0.05, (l['z_ini']+l['z_fin'])/2, f"{l['Tipo']}", fontsize=8)
-                
-                ax_geo.plot(q_adm, z_ax, 'b-', label='Q Adm')
-                ax_geo.plot(q_ult, z_ax, 'k--', label='Q Ult')
-                ax_geo.axvline(P_u, c='r', ls=':', label='Pu')
-                
-                rect_mp = patches.Rectangle((max_q*0.8, 0), max_q*0.05, L, fc='gray', ec='k')
-                ax_geo.add_patch(rect_mp)
-                ax_geo.invert_yaxis(); ax_geo.legend(); ax_geo.set_title("Capacidad Axial"); ax_geo.grid(True, ls=':')
-                ax_geo.set_ylabel("Profundidad (m)")
-                
-                # Deflexión
-                ax_def.plot(y_lat*1000, z_lat, 'm'); ax_def.set_title("Deflexión (mm)"); ax_def.grid(True, ls=':')
-                
-                # Momento/Cortante
-                ax_mom.plot(m_lat, z_lat, 'g', label='Momento'); ax_mom.set_title("Momento (kNm)"); ax_mom.grid(True, ls=':')
-                ax_mom2 = ax_mom.twiny()
-                ax_mom2.plot(v_lat, z_lat, 'orange', ls='--', label='Cortante')
-                
-                st.pyplot(fig_res)
-                
-                st.markdown("---")
-                st.markdown("#### Ecuaciones de Diseño")
-                st.latex(r"Q_{ult} = \sum \alpha_{bond} \cdot \pi D \cdot \Delta L")
-                st.latex(r"EI \frac{d^4y}{dz^4} + k_h D y = 0 \quad (\text{Winkler})")
-                
-                # Botón PDF
-                if st.button("Generar PDF Reporte"):
-                    try:
-                        buffer = BytesIO()
-                        p = canvas.Canvas(buffer, pagesize=letter)
-                        p.drawString(100, 750, "REPORTE DETALLADO - MICROPILE PRO")
-                        p.drawString(100, 730, f"Resultados para Configuración: L={L}m, D={D}m")
-                        p.drawString(100, 710, f"Carga Pu: {P_u} kN | Capacidad Geo: {q_geo_val:.1f} kN")
-                        p.drawString(100, 690, f"Deflexión Máxima: {max(abs(y_lat))*1000:.1f} mm")
-                        p.showPage(); p.save()
-                        st.download_button("Descargar", buffer, "Calculo_MP.pdf", "application/pdf")
-                    except: st.error("Error generando PDF")
+            cols_grid = st.columns(3)
+            for i, idx in enumerate(indices):
+                if idx in df.index:
+                    row = df.loc[idx]
+                    fig_cap, vol, w, l, h, s = draw_pile_cap(row, i+1)
+                    
+                    with cols_grid[i % 3]:
+                        with st.container(border=True):
+                            st.markdown(f"**Opción #{i+1}: {int(row['N'])} x Ø{int(row['D_mm'])}**")
+                            st.pyplot(fig_cap)
+                            st.caption(f"""
+                            **Vol:** {vol:.2f} m³  
+                            **Dim:** {w:.2f} x {l:.2f} x {h:.2f} m  
+                            **Sep:** {s:.2f} m
+                            """)
 
-# ==============================================================================
-# MAIN (LOGIN)
-# ==============================================================================
-def mostrar_registro():
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        st.markdown("## 🔒 Ingreso")
-        with st.form("reg"):
-            nombre = st.text_input("Usuario")
-            if st.form_submit_button("Entrar"):
-                st.session_state['usuario_registrado'] = True
-                st.session_state['datos_usuario'] = {'nombre': nombre}
-                st.rerun()
-
-if st.session_state['usuario_registrado']:
-    app_principal()
-else:
-    mostrar_registro()
+if __name__ == "__main__":
+    main()
