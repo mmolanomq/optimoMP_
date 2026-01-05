@@ -408,7 +408,7 @@ def main():
                 num_rows="dynamic", 
                 hide_index=True,
                 column_config={
-                    "color": st.column_config.ColorColumn("Color"),
+                    "color": "Color", # Ajustado para compatibilidad
                     "name": "Nombre",
                     "thickness": st.column_config.NumberColumn("H (m)", min_value=0.1, format="%.1f"),
                     "qs": st.column_config.NumberColumn("Qs (kPa)", min_value=0),
