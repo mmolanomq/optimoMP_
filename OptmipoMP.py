@@ -69,28 +69,33 @@ def init_session_state():
 def get_safe_column_config():
     """
     Crea la configuración de columnas verificando la versión de Streamlit.
-    Corrige el error: AttributeError: 'ColorColumn'
+    Corrige el error: AttributeError: 'ColorColumn' o st.column_config no existente.
     """
-    # Configuración base numérica (compatible con versiones recientes)
-    cols = {
-        "name": "Nombre",
-        "thickness": st.column_config.NumberColumn("H (m)", min_value=0.1, format="%.1f"),
-        "qs": st.column_config.NumberColumn("Qs (kPa)", min_value=0),
-        "f_exp": st.column_config.NumberColumn("F.Exp", min_value=1.0, max_value=3.0, step=0.1)
-    }
+    # 1. Verificar si existe el módulo column_config (Streamlit >= 1.23)
+    if not hasattr(st, 'column_config'):
+        return None
     
-    # Intento seguro para la columna de color
     try:
+        # 2. Intentar crear la configuración numérica
+        cols = {
+            "name": "Nombre",
+            "thickness": st.column_config.NumberColumn("H (m)", min_value=0.1, format="%.1f"),
+            "qs": st.column_config.NumberColumn("Qs (kPa)", min_value=0),
+            "f_exp": st.column_config.NumberColumn("F.Exp", min_value=1.0, max_value=3.0, step=0.1)
+        }
+        
+        # 3. Intentar añadir ColorColumn de forma segura
         if hasattr(st.column_config, 'ColorColumn'):
             cols["color"] = st.column_config.ColorColumn("Color")
         else:
-            # Fallback a texto si la versión es antigua
+            # Fallback a texto si la versión es intermedia (tiene column_config pero no ColorColumn)
             cols["color"] = st.column_config.TextColumn("Color (Hex)")
-    except Exception:
-        # Fallback de emergencia
-        cols["color"] = "Color"
-        
-    return cols
+            
+        return cols
+    except AttributeError:
+        # Si falla cualquier atributo dentro de column_config, retornamos None
+        # Esto hará que st.data_editor use la configuración por defecto (segura)
+        return None
 
 # ==============================================================================
 # BLOQUE 4: MOTOR DE CÁLCULO
@@ -294,21 +299,33 @@ def main():
         c1, c2 = st.columns([1, 2])
         with c1:
             st.markdown("### Datos de Entrada")
-            st.session_state['spt_df'] = st.data_editor(st.session_state['spt_df'], num_rows="dynamic", hide_index=True)
+            # Configuración SPT - Verificación de data_editor (versiones < 1.19)
+            if hasattr(st, 'data_editor'):
+                st.session_state['spt_df'] = st.data_editor(st.session_state['spt_df'], num_rows="dynamic", hide_index=True)
+            else:
+                st.warning("Versión de Streamlit antigua. Actualice para editar datos.")
+                st.dataframe(st.session_state['spt_df'])
+
             k_val = st.slider("Factor K", 1.0, 10.0, 3.5)
             nf_val = st.number_input("Nivel Freático (m)", 0.0, 50.0, 2.0)
             
             st.markdown("### Estratos")
-            # USANDO LA FUNCIÓN SEGURA PARA EVITAR EL ERROR
+            
+            # USANDO LA FUNCIÓN SEGURA PARA EVITAR EL ERROR DE COLUMN_CONFIG
             safe_cols = get_safe_column_config()
-            edited_layers = st.data_editor(
-                pd.DataFrame(st.session_state['layers']), 
-                num_rows="dynamic", 
-                hide_index=True, 
-                column_config=safe_cols,
-                use_container_width=True
-            )
-            st.session_state['layers'] = edited_layers.to_dict('records')
+            
+            if hasattr(st, 'data_editor'):
+                # Si safe_cols es None, data_editor usa config por defecto y NO falla
+                edited_layers = st.data_editor(
+                    pd.DataFrame(st.session_state['layers']), 
+                    num_rows="dynamic", 
+                    hide_index=True, 
+                    column_config=safe_cols,
+                    use_container_width=True
+                )
+                st.session_state['layers'] = edited_layers.to_dict('records')
+            else:
+                 st.dataframe(pd.DataFrame(st.session_state['layers']))
 
         with c2:
             fig = draw_integrated_model(st.session_state['layers'], st.session_state['spt_df'].to_dict('records'), k_val, nf_val)
